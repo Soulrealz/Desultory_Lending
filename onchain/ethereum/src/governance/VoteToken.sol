@@ -12,11 +12,7 @@ contract VoteToken is OFT {
         address _delegate
     ) OFT(_name, _symbol, _lzEndpoint, _delegate) Ownable(_delegate) 
     {
-        mint(10_000_000 * 1e18);
+        //mint(10_000_000 * 1e18);
     }
 
-    function mint(uint256 amount) onlyOwner external
-    {
-        _mint(address(this), amount);
-    }
 }
