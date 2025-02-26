@@ -1,0 +1,15 @@
+[submodule "onchain/ethereum/lib\\openzeppelin-contracts"]
+	path = onchain/ethereum/lib\\openzeppelin-contracts
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts
+[submodule "onchain/ethereum/lib\\forge-std"]
+	path = onchain/ethereum/lib\\forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "onchain/ethereum/lib\\layerzero-v2"]
+	path = onchain/ethereum/lib\\layerzero-v2
+	url = https://github.com/LayerZero-Labs/layerzero-v2
+[submodule "onchain/ethereum/lib\\openzeppelin-contracts-upgradeable"]
+	path = onchain/ethereum/lib\\openzeppelin-contracts-upgradeable
+	url = https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable
+[submodule "onchain/ethereum/lib\\devtools"]
+	path = onchain/ethereum/lib\\devtools
+	url = https://github.com/LayerZero-Labs/devtools
