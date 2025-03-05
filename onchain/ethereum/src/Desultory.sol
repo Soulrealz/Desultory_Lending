@@ -4,6 +4,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { Position } from "./PositionNFT.sol";
+import { OracleLib, AggregatorV3Interface } from "./libraries/OracleLib.sol";
 
 contract Desultory 
 {
@@ -13,6 +14,8 @@ contract Desultory
     error Desultory__AddressesAndFeedsDontMatch();
     error Desultory__ZeroAmount();
     error Desultory__TokenNotWhitelisted(address token);
+    error Desultory__OwnerMismatch();
+    error Desultory__WithdrawalWillViolateLTV();
 
     ////////////////////////
     // Events
@@ -23,6 +26,7 @@ contract Desultory
     // Types & interfaces
     ///////////////////////
     using SafeERC20 for IERC20;
+    using OracleLib for AggregatorV3Interface;
 
     ////////////////////////
     // Structs
@@ -37,11 +41,15 @@ contract Desultory
     ////////////////////////
     // State Variables
     ////////////////////////
-    mapping(address token => Collateral) private __tokenInfos;
+    mapping(address token => Collateral info) private __tokenInfos;
     mapping(uint256 position => mapping(address token => uint256 amount)) private __collateralBalances;
+    mapping(uint256 position => uint256 amount) private __userBorrows;
     mapping(address user => uint256 position) private __userPositions;
 
-    Position positionContract;
+    uint256 private __protocolDebtInDUSD;
+    uint256 private __totalFeesGenerated;
+
+    Position private __positionContract;
 
     ////////////////////////
     // Modifiers
@@ -82,12 +90,15 @@ contract Desultory
             __tokenInfos[tokenAddresses[i]] = Collateral(priceFeeds[i], decimals[i], ltvs[i]);
         }
 
-        positionContract = Position(_positionContract);
+        __positionContract = Position(_positionContract);
     }
 
     ////////////////////////
     // External Functions
     ////////////////////////
+
+    // @note for stablecoin LP providal
+    // function depositStable()
 
     function deposit(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
@@ -130,9 +141,45 @@ contract Desultory
         emit Deposit(msg.sender, token, amount);
     }
 
+    function withdraw(address token, uint256 amount, uint256 positionId) external moreThanZero(amount) isAllowedToken(token)
+    {
+        if (msg.sender != __positionContract.ownerOf(positionId))
+        {
+            revert Desultory__OwnerMismatch();
+        }
+
+        uint256 borrowedAmount = __userBorrows[positionId];
+        uint256 depositedAmount = __collateralBalances[positionId][token];
+        amount = depositedAmount < amount ? depositedAmount : amount;
+        
+        uint256 postWithdrawCollateralUSD = getValueInUSD(token, depositedAmount - amount);
+        uint256 newLTVToUphold = postWithdrawCollateralUSD * __tokenInfos[token].ltvRatio / 100;
+        if (borrowedAmount > newLTVToUphold)
+        {
+            revert Desultory__WithdrawalWillViolateLTV();
+        }
+        
+        __collateralBalances[positionId][token] -= amount;
+        IERC20(token).transfer(msg.sender, amount);
+    }
+
+    // @note withdrawMulti ? for multi token withdrawal
+    // @note payAndWithdraw
+
     ////////////////////////
     // Public Functions
     ////////////////////////
+
+    function getValueInUSD(address token, uint256 amount) public view returns (uint256)
+    {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(__tokenInfos[token].priceFeed);
+        (, int256 price,,,) = priceFeed.staleCheckLatestRoundData();
+
+        uint256 adjustedPrice = uint256(price) * (10 ** (18 - __tokenInfos[token].decimals));
+        uint256 adjustedAmount = amount * (10 ** (18 - __tokenInfos[token].decimals));
+
+        return (adjustedAmount * adjustedPrice) / 1e18;
+    }
 
     ///////////////////////
     // Private Functions
@@ -140,7 +187,7 @@ contract Desultory
 
     function createPosition() private returns (uint256)
     {
-        uint256 newPosition = positionContract.mint(msg.sender);
+        uint256 newPosition = __positionContract.mint(msg.sender);
         __userPositions[msg.sender] = newPosition;
         return newPosition;
     }

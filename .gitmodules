@@ -13,3 +13,6 @@
 [submodule "onchain/ethereum/lib\\devtools"]
 	path = onchain/ethereum/lib\\devtools
 	url = https://github.com/LayerZero-Labs/devtools
+[submodule "onchain/ethereum/lib\\foundry-chainlink-toolkit"]
+	path = onchain/ethereum/lib\\foundry-chainlink-toolkit
+	url = https://github.com/smartcontractkit/foundry-chainlink-toolkit
