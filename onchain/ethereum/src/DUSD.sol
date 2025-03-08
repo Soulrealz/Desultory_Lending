@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 import { OFT } from "@layerzerolabs/oft-evm/contracts/OFT.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
-contract VoteToken is OFT {
+contract DUSD is OFT {
 
     constructor(
         string memory _name,
