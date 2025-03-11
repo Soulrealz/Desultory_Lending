@@ -43,33 +43,64 @@ contract Desultory
         address priceFeed;
         uint8 decimals;
         uint8 ltvRatio;
+        uint16 borrowRate;
     }
+
+    struct Interest 
+    {
+        uint16 lowUtilization;
+        uint16 normalUtilization;
+        uint16 highUtilization;
+        uint16 extremeUtilization;
+
+        uint16 baseBorrowRate;
+        uint16 lowBorrowRate;
+        uint16 normalBorrowRate;
+        uint16 highBorrowRate;
+        uint16 extremeBorrowRate;
+    }
+
+    struct Borrower
+    {
+        uint256 lastTimestamp;
+        mapping(address token => uint256 index) lastBorrowIndex;
+        mapping(address token => uint256 amount) borrowedAmounts;        
+    }
+
 
     ////////////////////////
     // State Variables
     ////////////////////////
 
-    // @note Protocol Variables
+    // Protocol Variables
     uint256 constant private __protocolPositionId = 1;
 
-    // @note Position Related User Variables
+    // Position Related User Variables
     mapping(uint256 position => mapping(address token => uint256 amount)) private __userCollaterals;
-    mapping(uint256 position => mapping(address token => uint256 amount)) private __userBorrows;
+    mapping(uint256 position => Borrower info) private __userBorrows;
     mapping(address user => uint256 position) private __userPositions;
 
-    // @note Token Variables
+    // Token Variables
     mapping(address token => Collateral info) private __tokenInfos;
     mapping(uint256 tokenId => address token) private __tokenList;
     uint256 private __supportedTokensCount;
 
-    // @note DUSD Variables
+    // DUSD Variables
     uint256 private __protocolDebtInDUSD;
     uint256 private __totalFeesGenerated;
 
-    // @note Contract Variables
+    // Contract Variables
     Position private __positionContract;
     DUSD private __DUSD;
+    //@todo governor contract variable
 
+    // Interest Variables
+    Interest private __interest;
+    uint16 private constant MAX_BPS = 10_000;  // 100%
+    uint256 private constant SECONDS_PER_YEAR = 365 days;
+    mapping(address token => uint256 index) private __globalBorrowIndex;
+    mapping(address token => uint256 timestamp) private __lastUpdateTimestamp;
+    
     ////////////////////////
     // Modifiers
     ////////////////////////
@@ -97,22 +128,33 @@ contract Desultory
     ////////////////////////
 
     constructor(address[] memory tokenAddresses, address[] memory priceFeeds, uint8[] memory decimals, uint8[] memory ltvs,
-                address _positionContract, address _DUSDContract) 
+                uint8[] memory rates, address _positionContract, address _DUSDContract) 
     {
-        if (tokenAddresses.length != priceFeeds.length || tokenAddresses.length != ltvs.length || tokenAddresses.length != decimals.length)
+        if (ltvs.length != priceFeeds.length || ltvs.length != tokenAddresses.length || ltvs.length != decimals.length || ltvs.length != rates.length)
         {
             revert Desultory__AddressesAndFeedsDontMatch();
         }
 
         for (uint256 i = 0; i < tokenAddresses.length; i++)
         {
-            __tokenInfos[tokenAddresses[i]] = Collateral(priceFeeds[i], decimals[i], ltvs[i]);
+            __tokenInfos[tokenAddresses[i]] = Collateral(priceFeeds[i], decimals[i], ltvs[i], rates[i]);
             __tokenList[i] = tokenAddresses[i];
         }
 
         __supportedTokensCount = tokenAddresses.length;
         __positionContract = Position(_positionContract);
         __DUSD = DUSD(_DUSDContract);
+        __interest = Interest({
+            lowUtilization: 1500,       // 15%
+            normalUtilization: 8000,    // 80%
+            highUtilization: 9500,      // 95%
+            extremeUtilization: MAX_BPS,// 100%
+            baseBorrowRate: 100,        // 1%
+            lowBorrowRate: 200,         // 2%
+            normalBorrowRate: 700,      // 7%
+            highBorrowRate: 3500,       // 35%
+            extremeBorrowRate: 6500     // 65%
+        });
     }
 
     function initializeProtocolPosition() external 
@@ -189,7 +231,7 @@ contract Desultory
             revert Desultory__OwnerMismatch();
         }
 
-        uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[positionId][token]);
+        uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[positionId].borrowedAmounts[token]);
         uint256 depositedAmount = __userCollaterals[positionId][token];
         amount = depositedAmount < amount ? depositedAmount : amount;
         
@@ -237,7 +279,7 @@ contract Desultory
                 revert Desultory__CollateralValueNotEnough();
             }
 
-            __userBorrows[userPositionId][token] += amount;
+            __userBorrows[userPositionId].borrowedAmounts[token] += amount;
             IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
             emit Borrow(userPositionId, token, amount);
         }
@@ -252,7 +294,7 @@ contract Desultory
                 revert Desultory__CollateralValueNotEnough();
             }
 
-            __userBorrows[userPositionId][token] += amount;
+            __userBorrows[userPositionId].borrowedAmounts[token] += amount;
             IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
             emit Borrow(userPositionId, token, amount);
         }
@@ -260,6 +302,12 @@ contract Desultory
 
     // @note withdrawMulti ? for multi token withdrawal
     // @note payAndWithdraw
+
+    function getInterest() external
+    {
+        
+
+    }
 
     ////////////////////////
     // Public Functions
@@ -283,7 +331,7 @@ contract Desultory
         for (uint256 i = 0; i < __supportedTokensCount; i++)
         {
             address token = __tokenList[i];
-            uint256 amount = __userBorrows[position][token];
+            uint256 amount = __userBorrows[position].borrowedAmounts[token];
             totalUSD += getValueUSD(token, amount);
         }
 
@@ -316,6 +364,56 @@ contract Desultory
         return totalUSD;
     }
 
+    function getBorrowRate(address token, uint16 utilization) public view returns (uint16) 
+    {
+        Interest memory interest = __interest;
+        uint16 baseRate;
+
+        // Very Low Utilization Case
+        // FB = B + (U * L / Lu)
+        if (utilization <= interest.lowUtilization) 
+        {
+            baseRate = interest.baseBorrowRate + (utilization * interest.lowBorrowRate / interest.lowUtilization);
+        }
+        // Normal Utilization Case
+        // FB = B + L + ((U - Lu) * (N - L) / (Nu - Lu))
+        else if (utilization <= interest.normalUtilization) 
+        {
+            uint16 excessUtilization = utilization - interest.lowUtilization;
+            uint16 utilizationGap = interest.normalUtilization - interest.lowUtilization;
+
+            baseRate = interest.baseBorrowRate + interest.lowBorrowRate + 
+                (excessUtilization * (interest.normalBorrowRate - interest.lowBorrowRate) / utilizationGap);
+        }
+        // High Utilization Case
+        // FB = B + N + ((U - Nu) * (H - N) / (Hu - Nu))
+        else if (utilization <= interest.highUtilization) 
+        {
+            uint16 excessUtilization = utilization - interest.normalUtilization;
+            uint16 utilizationGap = interest.highUtilization - interest.normalUtilization;
+
+            baseRate = interest.baseBorrowRate + interest.normalBorrowRate + 
+                (excessUtilization * (interest.highBorrowRate - interest.normalBorrowRate) / utilizationGap);
+        }        
+        // Extreme Utilization Case
+        // FB = B + H + ((U - Hu) * (E - H) / (Eu - Hu))
+        else 
+        {
+            uint16 excessUtilization = utilization - interest.highUtilization;
+            uint16 utilizationGap = interest.extremeUtilization - interest.highUtilization;
+
+            baseRate = interest.baseBorrowRate + interest.highBorrowRate + 
+                (excessUtilization * (interest.extremeBorrowRate - interest.highBorrowRate) / utilizationGap);
+        }
+        
+        return (baseRate * __tokenInfos[token].borrowRate) / 100;
+    }
+
+    function getUtilization(address token) public view returns (uint16)
+    {
+        return uint16((__userBorrows[__protocolPositionId].borrowedAmounts[token] * 100) / __userCollaterals[__protocolPositionId][token]);
+    }
+
     ///////////////////////
     // Private Functions
     ///////////////////////
@@ -335,6 +433,36 @@ contract Desultory
     function recordWithdrawal(address token, uint256 amount) private
     {
         __userCollaterals[__protocolPositionId][token] -= amount;
+    }
+
+    function recordBorrow(address token, uint256 amount) private
+    {
+        __userBorrows[__protocolPositionId].borrowedAmounts[token] += amount;
+    }
+
+    function recordRepayment(address token, uint256 amount) private
+    {
+        __userBorrows[__protocolPositionId].borrowedAmounts[token] -= amount;
+    }
+
+    function updateGlobalBorrowIndex(address token) private 
+    {
+        if (__lastUpdateTimestamp[token] != 0)
+        {
+            uint256 timeElapsed = block.timestamp - __lastUpdateTimestamp[token];
+            if (timeElapsed == 0) return;
+
+            uint16 borrowRate = getBorrowRate(token, getUtilization(token));
+            uint256 interestFactor = ((borrowRate * timeElapsed) / SECONDS_PER_YEAR) * 1e18 / MAX_BPS;
+
+            __globalBorrowIndex[token] += (__globalBorrowIndex[token] * interestFactor) / 1e18;        
+            __lastUpdateTimestamp[token] = block.timestamp;
+        }
+        else
+        {
+            __globalBorrowIndex[token] = 1;
+            __lastUpdateTimestamp[token] = block.timestamp;
+        }
     }
 
     ///////////////////////
