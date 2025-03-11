@@ -203,7 +203,9 @@ contract Desultory
         {
             userPositionId = createPosition();
         }
+
         recordDeposit(token, amount);
+        updateGlobalBorrowIndex(token);
 
         // old user with correct position will increase his deposit
         // if (positionId != 0 && positionId == userPositionId) {}
@@ -242,6 +244,7 @@ contract Desultory
             revert Desultory__WithdrawalWillViolateLTV();
         }
         recordWithdrawal(token, amount);
+        updateGlobalBorrowIndex(token);
         
         __userCollaterals[positionId][token] -= amount;
         IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
@@ -268,6 +271,8 @@ contract Desultory
             revert Desultory__NoDepositMade();
         }
 
+        updateGlobalBorrowIndex(token);
+
         uint256 currentBorrowed = userBorrowedAmountUSD(userPositionId);
         if(currentBorrowed == 0)
         {
@@ -278,6 +283,8 @@ contract Desultory
             {
                 revert Desultory__CollateralValueNotEnough();
             }
+
+            recordBorrow(token, amount);
 
             __userBorrows[userPositionId].borrowedAmounts[token] += amount;
             IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
@@ -294,6 +301,8 @@ contract Desultory
                 revert Desultory__CollateralValueNotEnough();
             }
 
+            recordBorrow(token, amount);
+
             __userBorrows[userPositionId].borrowedAmounts[token] += amount;
             IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
             emit Borrow(userPositionId, token, amount);
@@ -303,10 +312,10 @@ contract Desultory
     // @note withdrawMulti ? for multi token withdrawal
     // @note payAndWithdraw
 
-    function getInterest() external
+    // @todo
+    function repay() external
     {
-        
-
+        // recordRepayment()
     }
 
     ////////////////////////
@@ -425,6 +434,10 @@ contract Desultory
         return newPosition;
     }
 
+    /**
+     * @dev functions to keep track of the assets
+     * in the protocol and how they're used
+     */
     function recordDeposit(address token, uint256 amount) private
     {
         __userCollaterals[__protocolPositionId][token] += amount;
@@ -444,6 +457,7 @@ contract Desultory
     {
         __userBorrows[__protocolPositionId].borrowedAmounts[token] -= amount;
     }
+    ///////////////////////////////////////////////////////////////////////////////
 
     function updateGlobalBorrowIndex(address token) private 
     {
