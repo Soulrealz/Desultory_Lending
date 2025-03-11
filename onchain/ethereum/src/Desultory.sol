@@ -467,7 +467,7 @@ contract Desultory
             if (timeElapsed == 0) return;
 
             uint16 borrowRate = getBorrowRate(token, getUtilization(token));
-            uint256 interestFactor = ((borrowRate * timeElapsed * 1e18) / SECONDS_PER_YEAR) * MAX_BPS;
+            uint256 interestFactor = ((borrowRate * timeElapsed * 1e18) / (SECONDS_PER_YEAR * MAX_BPS));
 
             __globalBorrowIndex[token] += (__globalBorrowIndex[token] * interestFactor) / 1e18;        
             __lastUpdateTimestamp[token] = block.timestamp;
