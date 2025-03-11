@@ -17,5 +17,10 @@ contract Position is ERC721, Ownable
         return tokenId;
     }
 
+    function isOwner(address suspect, uint256 nftId) external view returns (bool)
+    {
+        return super.ownerOf(nftId) == suspect;
+    }
+
     // @note make transfer and transferFrom onlyOwner. Make Desultory owner. NFT transfers will happen through this protocol only.
 }
