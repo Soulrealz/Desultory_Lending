@@ -1,13 +1,21 @@
 pragma solidity 0.8.28;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { console } from "forge-std/Test.sol";
 
-import { Position } from "./PositionNFT.sol";
-import { DUSD } from "./DUSD.sol";
+// Libs
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+
+// Other contracts
+import "./PositionNFT.sol";
+import "./DUSD.sol";
 import { OracleLib, AggregatorV3Interface } from "./libraries/OracleLib.sol";
 
-contract Desultory 
+////////////////////////
+import { console } from "forge-std/Test.sol";
+
+contract Desultory is IERC721Receiver
 {
     ////////////////////////
     // Errors
@@ -128,7 +136,7 @@ contract Desultory
     ////////////////////////
 
     constructor(address[] memory tokenAddresses, address[] memory priceFeeds, uint8[] memory decimals, uint8[] memory ltvs,
-                uint8[] memory rates, address _positionContract, address _DUSDContract) 
+                uint16[] memory rates, address _positionContract, address _DUSDContract) 
     {
         if (ltvs.length != priceFeeds.length || ltvs.length != tokenAddresses.length || ltvs.length != decimals.length || ltvs.length != rates.length)
         {
@@ -182,41 +190,7 @@ contract Desultory
      */
     function deposit(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
-        this.deposit(token, amount, 0); 
-    }
-
-    /**
-     * @dev deposit that requires the user to pass their position
-     * @param token which token to deposit
-     * @param amount how much of the token to deposit
-     * @param positionId the nft id of the user's position
-     */
-    function deposit(address token, uint256 amount, uint256 positionId) external moreThanZero(amount) isAllowedToken(token)
-    {
-        uint256 userPositionId = __userPositions[msg.sender];
-        if (positionId != 0 && !__positionContract.isOwner(msg.sender, positionId))
-        {
-            revert Desultory__OwnerMismatch();
-        }
-        // new user will create position
-        else if (positionId == 0 && userPositionId == 0)
-        {
-            userPositionId = createPosition();
-        }
-
-        recordDeposit(token, amount);
-        updateGlobalBorrowIndex(token);
-
-        // old user with correct position will increase his deposit
-        // if (positionId != 0 && positionId == userPositionId) {}
-
-        // old user doesnt know his position will use position from mapping
-        // if (positionId != 0 && positionId != userPositionId) {}
-        // if (positionId == 0 && userPositionId != 0) {}        
-
-        __userCollaterals[userPositionId][token] += amount;
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit Deposit(msg.sender, userPositionId, token, amount);
+        deposit(token, amount, 0); 
     }
 
     // @todo withdrawAll function
@@ -318,9 +292,53 @@ contract Desultory
         // recordRepayment()
     }
 
+    function onERC721Received(address /*operator*/, address /*from*/, uint256 /*tokenId*/, bytes calldata /*data*/) external pure override returns (bytes4) 
+    {
+        return this.onERC721Received.selector;
+    }
+
     ////////////////////////
     // Public Functions
     ////////////////////////
+
+        /**
+     * @dev deposit that requires the user to pass their position
+     * @param token which token to deposit
+     * @param amount how much of the token to deposit
+     * @param positionId the nft id of the user's position
+     */
+    function deposit(address token, uint256 amount, uint256 positionId) public moreThanZero(amount) isAllowedToken(token)
+    {
+        uint256 userPositionId = __userPositions[msg.sender];
+        if (positionId != 0 && !__positionContract.isOwner(msg.sender, positionId))
+        {
+            revert Desultory__OwnerMismatch();
+        }
+        // new user will create position
+        else if (positionId == 0 && userPositionId == 0)
+        {
+            userPositionId = createPosition();
+        }
+
+        recordDeposit(token, amount);
+        updateGlobalBorrowIndex(token);
+
+        // old user with correct position will increase his deposit
+        // if (positionId != 0 && positionId == userPositionId) {}
+
+        // old user doesnt know his position will use position from mapping
+        // if (positionId != 0 && positionId != userPositionId) {}
+        // if (positionId == 0 && userPositionId != 0) {}        
+
+        __userCollaterals[userPositionId][token] += amount;
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit Deposit(msg.sender, userPositionId, token, amount);
+    } 
+
+    function getPositionCollateralForToken(uint256 position, address token) public view returns (uint256)
+    {
+        return __userCollaterals[position][token];
+    }
 
     function getValueUSD(address token, uint256 amount) public view returns (uint256)
     {   
