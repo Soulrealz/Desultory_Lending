@@ -255,53 +255,38 @@ contract Desultory is IERC721Receiver
         if (amount > __userCollaterals[__protocolPositionId][token])
         {
             revert Desultory__ProtocolNotEnoughFunds(token);
-        }        
+        }
 
+        Borrower storage borrower = __userBorrows[position];
         uint256 currentBorrowed = userBorrowedAmountUSD(position);
-        if(currentBorrowed == 0)
+        uint256 prevIndex = borrower.lastBorrowIndex[token];
+        uint256 currIndex = __globalBorrowIndex[token];
+
+        if (prevIndex > 0 && currIndex > prevIndex) 
         {
-            uint256 desiredUSD = getValueUSD(token, amount);
-            uint256 availableUSD = userMaxBorrowValueUSD(position);
-
-            if (desiredUSD > availableUSD)
-            {
-                revert Desultory__CollateralValueNotEnough();
-            }
-
-            recordBorrow(token, amount);
-
-            __userBorrows[position].borrowedAmounts[token] = amount;
-            __userBorrows[position].lastTimestamp = block.timestamp;
-            __userBorrows[position].lastBorrowIndex[token] = __globalBorrowIndex[token];
-
-            IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
-            emit Borrow(position, token, amount);
+            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
+            currentBorrowed += getValueUSD(token, interestAccrued);
         }
-        else
+
+        uint256 desiredUSD = getValueUSD(token, amount);
+        uint256 availableUSD = userMaxBorrowValueUSD(position);
+        if (currentBorrowed > 0) 
         {
-            uint256 prevIndex = __userBorrows[position].lastBorrowIndex[token];
-            uint256 currIndex = __globalBorrowIndex[token];
-
-            if (currIndex > prevIndex) 
-            {
-                uint256 interestAccrued = (__userBorrows[position].borrowedAmounts[token] * currIndex) / prevIndex - __userBorrows[position].borrowedAmounts[token];
-                currentBorrowed += getValueUSD(token, interestAccrued);
-            }
-
-            uint256 desiredUSD = getValueUSD(token, amount);
-            uint256 availableUSD = userMaxBorrowValueUSD(position) - currentBorrowed;
-
-            if (desiredUSD > availableUSD)
-            {
-                revert Desultory__CollateralValueNotEnough();
-            }
-
-            recordBorrow(token, amount);
-
-            __userBorrows[position].borrowedAmounts[token] += amount;
-            IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
-            emit Borrow(position, token, amount);
+            availableUSD -= currentBorrowed;
         }
+
+        if (desiredUSD > availableUSD)
+        {
+            revert Desultory__CollateralValueNotEnough();
+        }
+
+        borrower.borrowedAmounts[token] += amount;
+        borrower.lastTimestamp = block.timestamp;
+        borrower.lastBorrowIndex[token] = currIndex;
+
+        recordBorrow(token, amount);
+        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+        emit Borrow(position, token, amount);
     }
 
     // @note withdrawMulti ? for multi token withdrawal
@@ -324,7 +309,10 @@ contract Desultory is IERC721Receiver
             revert Desultory__NoExistingBorrow(token);
         }
 
-        //if ()
+        if (amount > __userBorrows[position].borrowedAmounts[token])
+        {
+            amount = __userBorrows[position].borrowedAmounts[token]
+        }
     }
 
     function onERC721Received(address /*operator*/, address /*from*/, uint256 /*tokenId*/, bytes calldata /*data*/) external pure override returns (bytes4) 
