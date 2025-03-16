@@ -54,6 +54,12 @@ contract DesultoryTest is Test
     }
 
 
+    function testInit() public
+    {
+        vm.expectRevert(Desultory.Desultory__ProtocolPositionAlreadyInitialized.selector);
+        desultory.initializeProtocolPosition();
+    }
+
     ///////////////////////
     // Deposit Tests
     ///////////////////////
@@ -65,28 +71,13 @@ contract DesultoryTest is Test
         vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
         desultory.deposit(weth, zeroAmount);
 
-        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
-        desultory.deposit(weth, zeroAmount, 0);
-
         vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__TokenNotWhitelisted.selector, dead));
         desultory.deposit(dead, 1);
 
-        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__TokenNotWhitelisted.selector, dead));
-        desultory.deposit(dead, 1, 0);
-
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721NonexistentToken.selector, 99999999));
-        desultory.deposit(weth, 1, 99999999);
-
-        vm.expectRevert(Desultory.Desultory__OwnerMismatch.selector);
-        desultory.deposit(weth, 1, 1);
-
-        vm.stopPrank();
-
-        vm.expectRevert(Desultory.Desultory__ProtocolPositionAlreadyInitialized.selector);
-        desultory.initializeProtocolPosition();
+        vm.stopPrank();        
     }
  
-    function testDepositNoPosition() public
+    function testDeposit() public
     {
         // User 1
         uint256 depositAmount = 1e18;
@@ -118,24 +109,5 @@ contract DesultoryTest is Test
         assertTrue(position.isOwner(bob, position2));
         assertEq(deposit2, desultory.getPositionCollateralForToken(position2, weth));
         assertEq(deposit2 + depositAmount, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
-    }
-
-    function testDepositWithPosition() public
-    {
-        // User 1
-        uint256 depositAmount = 1e18;
-        uint256 expectedPosition = 2;
-
-        vm.startPrank(alice);
-
-        desultory.deposit(weth, depositAmount);
-
-        vm.expectEmit(true, true, true, true);
-        emit Desultory.Deposit(alice, expectedPosition, weth, depositAmount * 2);
-        desultory.deposit(weth, depositAmount * 2, expectedPosition);
-        assertEq(depositAmount * 2 + depositAmount, desultory.getPositionCollateralForToken(expectedPosition, weth));
-        assertEq(depositAmount * 2 + depositAmount, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
-
-        vm.stopPrank();
     }
 }
