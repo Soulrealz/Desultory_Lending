@@ -218,6 +218,10 @@ contract Desultory is IERC721Receiver
         updateGlobalBorrowIndex(token);
 
         uint256 position = __userPositions[msg.sender];
+        if (position == 0 || __userCollaterals[position][token] == 0)
+        {
+            revert Desultory__NoDepositMade();
+        }
 
         uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[position].borrowedAmounts[token]);
         uint256 depositedAmount = __userCollaterals[position][token];
@@ -232,7 +236,7 @@ contract Desultory is IERC721Receiver
         recordWithdrawal(token, amount);
         
         __userCollaterals[position][token] -= amount;
-        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+        IERC20(token).safeTransfer(msg.sender, amount);
         emit Withdrawal(position, token, amount);
     }
 
@@ -289,7 +293,7 @@ contract Desultory is IERC721Receiver
         borrower.lastBorrowIndex[token] = currIndex;
 
         recordBorrow(token, amount);
-        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+        IERC20(token).safeTransfer(msg.sender, amount);
         emit Borrow(position, token, amount);
     }
 
