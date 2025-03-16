@@ -110,4 +110,52 @@ contract DesultoryTest is Test
         assertEq(deposit2, desultory.getPositionCollateralForToken(position2, weth));
         assertEq(deposit2 + depositAmount, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
     }
+
+    ///////////////////////
+    // Withdraw Tests
+    ///////////////////////
+    function testWithdrawReverts() public 
+    {
+        vm.startPrank(alice);
+
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.withdraw(weth, zeroAmount);
+
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__TokenNotWhitelisted.selector, dead));
+        desultory.withdraw(dead, 1);
+
+        vm.expectRevert(Desultory.Desultory__NoDepositMade.selector);
+        desultory.withdraw(weth, 1e18);
+        
+        desultory.deposit(weth, 1e18);
+
+        vm.expectRevert(Desultory.Desultory__NoDepositMade.selector);
+        desultory.withdraw(usdc, 1e18);
+
+        desultory.borrow(weth, 1e9);
+
+        vm.expectRevert(Desultory.Desultory__WithdrawalWillViolateLTV.selector);
+        desultory.withdraw(weth, 1e18);
+
+        vm.stopPrank();        
+    }
+
+    // @todo multiasset multiuser deposit (fuzzable)
+    function testWithdraw() public
+    {
+        uint256 depositAmount = 1e18;
+        uint256 balBefore = MockERC20(weth).balanceOf(alice);
+
+        vm.startPrank(alice);
+
+        desultory.deposit(weth, depositAmount);
+        desultory.withdraw(weth, depositAmount);
+
+        vm.stopPrank();
+
+        assertEq(0, MockERC20(weth).balanceOf(address(desultory)));
+        assertEq(0, desultory.getPositionCollateralForToken(2, weth));
+        assertEq(0, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
+        assertEq(balBefore, MockERC20(weth).balanceOf(alice));
+    }
 }
