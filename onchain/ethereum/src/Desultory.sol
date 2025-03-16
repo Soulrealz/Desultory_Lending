@@ -35,8 +35,9 @@ contract Desultory is IERC721Receiver
     // Events
     ////////////////////////
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
+    event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
-    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);   
+    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);    
     
     ///////////////////////
     // Types & interfaces
@@ -266,6 +267,9 @@ contract Desultory is IERC721Receiver
         {
             uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
             currentBorrowed += getValueUSD(token, interestAccrued);
+
+            borrower.borrowedAmounts[token] += interestAccrued;
+            recordBorrow(token, interestAccrued);
         }
 
         uint256 desiredUSD = getValueUSD(token, amount);
@@ -294,7 +298,7 @@ contract Desultory is IERC721Receiver
 
     // @todo
     // will allow others to repay your debt
-    function repay(address token, uint256 amount) external
+    function repay(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
         updateGlobalBorrowIndex(token);
 
@@ -304,15 +308,35 @@ contract Desultory is IERC721Receiver
             revert Desultory__NoDepositMade();
         }
 
-        if (__userBorrows[position].lastTimestamp == 0)
+        Borrower storage borrower = __userBorrows[position];
+        if (borrower.borrowedAmounts[token] == 0)
         {
             revert Desultory__NoExistingBorrow(token);
         }
+        
+        uint256 prevIndex = borrower.lastBorrowIndex[token];
+        uint256 currIndex = __globalBorrowIndex[token];
 
-        if (amount > __userBorrows[position].borrowedAmounts[token])
+        if (currIndex > prevIndex) 
         {
-            amount = __userBorrows[position].borrowedAmounts[token]
+            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
+
+            borrower.borrowedAmounts[token] += interestAccrued;
+            recordBorrow(token, interestAccrued);
         }
+
+        if (amount > borrower.borrowedAmounts[token])
+        {
+            amount = borrower.borrowedAmounts[token];
+        }
+
+        borrower.borrowedAmounts[token] -= amount;
+        borrower.lastTimestamp = block.timestamp;
+        borrower.lastBorrowIndex[token] = currIndex;
+
+        recordRepayment(token, amount);
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit Repayment(position, token, amount);
     }
 
     function onERC721Received(address /*operator*/, address /*from*/, uint256 /*tokenId*/, bytes calldata /*data*/) external pure override returns (bytes4) 
