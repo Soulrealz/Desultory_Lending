@@ -8,3 +8,8 @@ forge install OpenZeppelin/openzeppelin-contracts --no-commit
 forge install foundry-rs/forge-std --no-commit
 forge install smartcontractkit/foundry-chainlink-toolkit --no-commit
 ```
+
+## To run tests do:
+```
+forge test -vvv
+```

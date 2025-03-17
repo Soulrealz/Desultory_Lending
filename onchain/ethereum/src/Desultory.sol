@@ -1,13 +1,21 @@
 pragma solidity 0.8.28;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { console } from "forge-std/Test.sol";
 
-import { Position } from "./PositionNFT.sol";
-import { DUSD } from "./DUSD.sol";
+// Libs
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
+
+// Other contracts
+import "./PositionNFT.sol";
+import "./DUSD.sol";
 import { OracleLib, AggregatorV3Interface } from "./libraries/OracleLib.sol";
 
-contract Desultory 
+////////////////////////
+import { console } from "forge-std/Test.sol";
+
+contract Desultory is IERC721Receiver
 {
     ////////////////////////
     // Errors
@@ -17,17 +25,19 @@ contract Desultory
     error Desultory__NoDepositMade();
     error Desultory__WithdrawalWillViolateLTV();    
     error Desultory__CollateralValueNotEnough();
-    error Desultory__AddressesAndFeedsDontMatch();    
+    error Desultory__AddressesAndFeedsDontMatch();
+    error Desultory__NoExistingBorrow(address token);   
     error Desultory__TokenNotWhitelisted(address token);    
     error Desultory__ProtocolPositionAlreadyInitialized();
-    error Desultory__ProtocolNotEnoughFunds(address token);
+    error Desultory__ProtocolNotEnoughFunds(address token);    
 
     ////////////////////////
     // Events
     ////////////////////////
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
+    event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
-    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);   
+    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);    
     
     ///////////////////////
     // Types & interfaces
@@ -128,7 +138,7 @@ contract Desultory
     ////////////////////////
 
     constructor(address[] memory tokenAddresses, address[] memory priceFeeds, uint8[] memory decimals, uint8[] memory ltvs,
-                uint8[] memory rates, address _positionContract, address _DUSDContract) 
+                uint16[] memory rates, address _positionContract, address _DUSDContract) 
     {
         if (ltvs.length != priceFeeds.length || ltvs.length != tokenAddresses.length || ltvs.length != decimals.length || ltvs.length != rates.length)
         {
@@ -176,65 +186,41 @@ contract Desultory
 
     // @todo Add payable deposit for Ethereum deposits
     /**
-     * @dev simple deposit for creating a position or increase a deposit in case you dont know your id
+     * @dev deposit X amount of Y token
      * @param token which token to deposit
      * @param amount how much of the token to deposit
      */
     function deposit(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
-        this.deposit(token, amount, 0); 
-    }
+        updateGlobalBorrowIndex(token);
 
-    /**
-     * @dev deposit that requires the user to pass their position
-     * @param token which token to deposit
-     * @param amount how much of the token to deposit
-     * @param positionId the nft id of the user's position
-     */
-    function deposit(address token, uint256 amount, uint256 positionId) external moreThanZero(amount) isAllowedToken(token)
-    {
-        uint256 userPositionId = __userPositions[msg.sender];
-        if (positionId != 0 && !__positionContract.isOwner(msg.sender, positionId))
+        uint256 position = __userPositions[msg.sender];
+        if (position == 0)
         {
-            revert Desultory__OwnerMismatch();
-        }
-        // new user will create position
-        else if (positionId == 0 && userPositionId == 0)
-        {
-            userPositionId = createPosition();
+            position = createPosition();
         }
 
         recordDeposit(token, amount);
-        updateGlobalBorrowIndex(token);
 
-        // old user with correct position will increase his deposit
-        // if (positionId != 0 && positionId == userPositionId) {}
-
-        // old user doesnt know his position will use position from mapping
-        // if (positionId != 0 && positionId != userPositionId) {}
-        // if (positionId == 0 && userPositionId != 0) {}        
-
-        __userCollaterals[userPositionId][token] += amount;
+        __userCollaterals[position][token] += amount;
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit Deposit(msg.sender, userPositionId, token, amount);
-    }
+        emit Deposit(msg.sender, position, token, amount);
+    } 
 
     // @todo withdrawAll function
     /**
      * @dev function to withdraw a given token
      * @param token which token to withdraw deposit from
      * @param amount how much to withdraw
-     * @param positionId the nft id of the user's position
      */
-    function withdraw(address token, uint256 amount, uint256 positionId) external moreThanZero(amount) isAllowedToken(token)
+    function withdraw(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
-        if (!__positionContract.isOwner(msg.sender, positionId))
-        {
-            revert Desultory__OwnerMismatch();
-        }
+        updateGlobalBorrowIndex(token);
 
-        uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[positionId].borrowedAmounts[token]);
-        uint256 depositedAmount = __userCollaterals[positionId][token];
+        uint256 position = __userPositions[msg.sender];
+
+        uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[position].borrowedAmounts[token]);
+        uint256 depositedAmount = __userCollaterals[position][token];
         amount = depositedAmount < amount ? depositedAmount : amount;
         
         uint256 postWithdrawCollateralUSD = getValueUSD(token, depositedAmount - amount);
@@ -244,11 +230,10 @@ contract Desultory
             revert Desultory__WithdrawalWillViolateLTV();
         }
         recordWithdrawal(token, amount);
-        updateGlobalBorrowIndex(token);
         
-        __userCollaterals[positionId][token] -= amount;
+        __userCollaterals[position][token] -= amount;
         IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
-        emit Withdrawal(positionId, token, amount);
+        emit Withdrawal(position, token, amount);
     }
 
     // @note to make a borrow for DUSD? is it necessary?
@@ -260,67 +245,113 @@ contract Desultory
 
     function borrow(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
+        updateGlobalBorrowIndex(token);
+
+        uint256 position = __userPositions[msg.sender];
+        if (position == 0)
+        {
+            revert Desultory__NoDepositMade();
+        }
+
         if (amount > __userCollaterals[__protocolPositionId][token])
         {
             revert Desultory__ProtocolNotEnoughFunds(token);
         }
 
-        uint256 userPositionId = __userPositions[msg.sender];
-        if (userPositionId == 0)
+        Borrower storage borrower = __userBorrows[position];
+        uint256 currentBorrowed = userBorrowedAmountUSD(position);
+        uint256 prevIndex = borrower.lastBorrowIndex[token];
+        uint256 currIndex = __globalBorrowIndex[token];
+
+        if (prevIndex > 0 && currIndex > prevIndex) 
         {
-            revert Desultory__NoDepositMade();
+            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
+            currentBorrowed += getValueUSD(token, interestAccrued);
+
+            borrower.borrowedAmounts[token] += interestAccrued;
+            recordBorrow(token, interestAccrued);
         }
 
-        updateGlobalBorrowIndex(token);
-
-        uint256 currentBorrowed = userBorrowedAmountUSD(userPositionId);
-        if(currentBorrowed == 0)
+        uint256 desiredUSD = getValueUSD(token, amount);
+        uint256 availableUSD = userMaxBorrowValueUSD(position);
+        if (currentBorrowed > 0) 
         {
-            uint256 desiredUSD = getValueUSD(token, amount);
-            uint256 availableUSD = userMaxBorrowValueUSD(userPositionId);
-
-            if (desiredUSD > availableUSD)
-            {
-                revert Desultory__CollateralValueNotEnough();
-            }
-
-            recordBorrow(token, amount);
-
-            __userBorrows[userPositionId].borrowedAmounts[token] += amount;
-            IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
-            emit Borrow(userPositionId, token, amount);
+            availableUSD -= currentBorrowed;
         }
-        else
+
+        if (desiredUSD > availableUSD)
         {
-            // @todo add fee calculations here
-            uint256 desiredUSD = getValueUSD(token, amount);
-            uint256 availableUSD = userMaxBorrowValueUSD(userPositionId) - currentBorrowed;
-
-            if (desiredUSD > availableUSD)
-            {
-                revert Desultory__CollateralValueNotEnough();
-            }
-
-            recordBorrow(token, amount);
-
-            __userBorrows[userPositionId].borrowedAmounts[token] += amount;
-            IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
-            emit Borrow(userPositionId, token, amount);
+            revert Desultory__CollateralValueNotEnough();
         }
+
+        borrower.borrowedAmounts[token] += amount;
+        borrower.lastTimestamp = block.timestamp;
+        borrower.lastBorrowIndex[token] = currIndex;
+
+        recordBorrow(token, amount);
+        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+        emit Borrow(position, token, amount);
     }
 
     // @note withdrawMulti ? for multi token withdrawal
     // @note payAndWithdraw
 
     // @todo
-    function repay() external
+    // will allow others to repay your debt
+    function repay(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token)
     {
-        // recordRepayment()
+        updateGlobalBorrowIndex(token);
+
+        uint256 position = __userPositions[msg.sender];
+        if (position == 0)
+        {
+            revert Desultory__NoDepositMade();
+        }
+
+        Borrower storage borrower = __userBorrows[position];
+        if (borrower.borrowedAmounts[token] == 0)
+        {
+            revert Desultory__NoExistingBorrow(token);
+        }
+        
+        uint256 prevIndex = borrower.lastBorrowIndex[token];
+        uint256 currIndex = __globalBorrowIndex[token];
+
+        if (currIndex > prevIndex) 
+        {
+            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
+
+            borrower.borrowedAmounts[token] += interestAccrued;
+            recordBorrow(token, interestAccrued);
+        }
+
+        if (amount > borrower.borrowedAmounts[token])
+        {
+            amount = borrower.borrowedAmounts[token];
+        }
+
+        borrower.borrowedAmounts[token] -= amount;
+        borrower.lastTimestamp = block.timestamp;
+        borrower.lastBorrowIndex[token] = currIndex;
+
+        recordRepayment(token, amount);
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit Repayment(position, token, amount);
+    }
+
+    function onERC721Received(address /*operator*/, address /*from*/, uint256 /*tokenId*/, bytes calldata /*data*/) external pure override returns (bytes4) 
+    {
+        return this.onERC721Received.selector;
     }
 
     ////////////////////////
     // Public Functions
     ////////////////////////
+
+    function getPositionCollateralForToken(uint256 position, address token) public view returns (uint256)
+    {
+        return __userCollaterals[position][token];
+    }
 
     function getValueUSD(address token, uint256 amount) public view returns (uint256)
     {   
@@ -474,7 +505,7 @@ contract Desultory
         }
         else
         {
-            __globalBorrowIndex[token] = 1;
+            __globalBorrowIndex[token] = 1e18;
             __lastUpdateTimestamp[token] = block.timestamp;
         }
     }
