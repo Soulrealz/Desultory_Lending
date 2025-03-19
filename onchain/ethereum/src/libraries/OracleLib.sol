@@ -3,8 +3,7 @@ pragma solidity 0.8.28;
 
 import {AggregatorV3Interface} from "@chainlink/contracts/interfaces/feeds/AggregatorV3Interface.sol";
 
-library OracleLib 
-{
+library OracleLib {
     error OracleLib__StalePrice();
 
     uint256 public constant TIMEOUT = 3 hours;
@@ -17,8 +16,7 @@ library OracleLib
         (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound) =
             chainlinkFeed.latestRoundData();
 
-        if (updatedAt == 0 || answeredInRound < roundId) 
-        {
+        if (updatedAt == 0 || answeredInRound < roundId) {
             revert OracleLib__StalePrice();
         }
         uint256 secondsSince = block.timestamp - updatedAt;
@@ -27,8 +25,7 @@ library OracleLib
         return (roundId, answer, startedAt, updatedAt, answeredInRound);
     }
 
-    function getTimeout(AggregatorV3Interface /* chainlinkFeed */ ) public pure returns (uint256) 
-    {
+    function getTimeout(AggregatorV3Interface /* chainlinkFeed */ ) public pure returns (uint256) {
         return TIMEOUT;
     }
 }

@@ -1,23 +1,22 @@
 pragma solidity 0.8.28;
 
-import { Test, console } from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 
-import { Desultory } from "../src/Desultory.sol";
-import { Position } from "../src/PositionNFT.sol";
-import { DUSD } from "../src/DUSD.sol";
-import { Deploy } from "../script/Deploy.s.sol";
+import {Desultory} from "../src/Desultory.sol";
+import {Position} from "../src/PositionNFT.sol";
+import {DUSD} from "../src/DUSD.sol";
+import {Deploy} from "../script/Deploy.s.sol";
 import "./mocks/MockERC20.sol";
 
-import { IERC721Errors } from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
-contract DesultoryTest is Test
-{
+contract DesultoryTest is Test {
     Desultory desultory;
     Position position;
     DUSD dusd;
     Deploy deploy;
 
-    uint256 constant private __protocolPositionId = 1;
+    uint256 private constant __protocolPositionId = 1;
 
     address weth;
     address usdc;
@@ -31,8 +30,7 @@ contract DesultoryTest is Test
     uint256 zeroAmount = 0;
     address dead = 0x000000000000000000000000000000000000dEaD;
 
-    function setUp() public
-    {
+    function setUp() public {
         deploy = new Deploy();
         (address addr1, address addr2, address addr3) = deploy.run();
         desultory = Desultory(addr1);
@@ -53,9 +51,7 @@ contract DesultoryTest is Test
         MockERC20(usdc).approve(address(desultory), 10_000e8);
     }
 
-
-    function testInit() public
-    {
+    function testInit() public {
         vm.expectRevert(Desultory.Desultory__ProtocolPositionAlreadyInitialized.selector);
         desultory.initializeProtocolPosition();
     }
@@ -64,8 +60,7 @@ contract DesultoryTest is Test
     // Deposit Tests
     ///////////////////////
     // @todo multiasset multiuser deposit (fuzzable)
-    function testDepositReverts() public 
-    {
+    function testDepositReverts() public {
         vm.startPrank(alice);
 
         vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
@@ -74,11 +69,10 @@ contract DesultoryTest is Test
         vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__TokenNotWhitelisted.selector, dead));
         desultory.deposit(dead, 1);
 
-        vm.stopPrank();        
+        vm.stopPrank();
     }
- 
-    function testDeposit() public
-    {
+
+    function testDeposit() public {
         // User 1
         uint256 depositAmount = 1e18;
         uint256 expectedPosition = 2;
@@ -87,7 +81,7 @@ contract DesultoryTest is Test
         vm.expectEmit(true, true, true, true);
         emit Desultory.Deposit(alice, expectedPosition, weth, depositAmount);
         desultory.deposit(weth, depositAmount);
-        
+
         assertTrue(position.isOwner(alice, expectedPosition));
         assertEq(depositAmount, MockERC20(weth).balanceOf(address(desultory)));
         assertEq(depositAmount, desultory.getPositionCollateralForToken(expectedPosition, weth));
@@ -105,7 +99,7 @@ contract DesultoryTest is Test
         vm.expectEmit(true, true, true, true);
         emit Desultory.Deposit(bob, position2, weth, deposit2);
         desultory.deposit(weth, deposit2);
-        
+
         assertTrue(position.isOwner(bob, position2));
         assertEq(deposit2, desultory.getPositionCollateralForToken(position2, weth));
         assertEq(deposit2 + depositAmount, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
@@ -114,8 +108,7 @@ contract DesultoryTest is Test
     ///////////////////////
     // Withdraw Tests
     ///////////////////////
-    function testWithdrawReverts() public 
-    {
+    function testWithdrawReverts() public {
         vm.startPrank(alice);
 
         vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
@@ -126,7 +119,7 @@ contract DesultoryTest is Test
 
         vm.expectRevert(Desultory.Desultory__NoDepositMade.selector);
         desultory.withdraw(weth, 1e18);
-        
+
         desultory.deposit(weth, 1e18);
 
         vm.expectRevert(Desultory.Desultory__NoDepositMade.selector);
@@ -137,12 +130,11 @@ contract DesultoryTest is Test
         vm.expectRevert(Desultory.Desultory__WithdrawalWillViolateLTV.selector);
         desultory.withdraw(weth, 1e18);
 
-        vm.stopPrank();        
+        vm.stopPrank();
     }
 
     // @todo multiasset multiuser withdraw (fuzzable)
-    function testWithdraw() public
-    {
+    function testWithdraw() public {
         uint256 depositAmount = 1e18;
         uint256 expectedPosition = 2;
         uint256 balBefore = MockERC20(weth).balanceOf(alice);
@@ -169,8 +161,7 @@ contract DesultoryTest is Test
     ///////////////////////
 
     // @todo multiasset multiuser borrow with time passes (fuzzable)
-    function testBorrowReverts() public
-    {
+    function testBorrowReverts() public {
         uint256 depositAmount = 1e18;
         vm.startPrank(alice);
 
@@ -191,11 +182,10 @@ contract DesultoryTest is Test
         vm.expectRevert(Desultory.Desultory__CollateralValueNotEnough.selector);
         desultory.borrow(weth, depositAmount - 1);
 
-        vm.stopPrank();        
+        vm.stopPrank();
     }
 
-    function testBorrow() public
-    {
+    function testBorrow() public {
         uint256 depositAmount = 1e18;
         uint256 borrowAmount = 5e17;
         uint256 expectedPosition = 2;

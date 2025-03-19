@@ -1,7 +1,6 @@
 pragma solidity 0.8.28;
 
-contract MockLZ
-{
+contract MockLZ {
     event MessageSent(uint16 indexed dstChainId, bytes indexed toAddress, bytes payload);
 
     function send(
@@ -11,17 +10,14 @@ contract MockLZ
         address payable, // _refundAddress
         address, // _zroPaymentAddress
         bytes calldata // _adapterParams
-    ) external payable 
-    {
+    ) external payable {
         emit MessageSent(_dstChainId, _toAddress, _payload);
     }
 
-    function estimateFees(
-        uint16,
-        address,
-        bytes calldata,
-        bool
-    ) external pure returns (uint256 nativeFee, uint256 zroFee) 
+    function estimateFees(uint16, address, bytes calldata, bool)
+        external
+        pure
+        returns (uint256 nativeFee, uint256 zroFee)
     {
         return (0, 0); // No fees for local testing
     }
