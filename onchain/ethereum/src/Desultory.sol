@@ -23,22 +23,26 @@ contract Desultory is IERC721Receiver
     error Desultory__ZeroAmount();
     error Desultory__OwnerMismatch();
     error Desultory__NoDepositMade();
+    error Desultory__LTVRatioNotBroken();
     error Desultory__WithdrawalWillViolateLTV();    
     error Desultory__CollateralValueNotEnough();
     error Desultory__AddressesAndFeedsDontMatch();
     error Desultory__NoExistingBorrow(address token);   
     error Desultory__TokenNotWhitelisted(address token);    
     error Desultory__ProtocolPositionAlreadyInitialized();
-    error Desultory__ProtocolNotEnoughFunds(address token);    
+    error Desultory__ProtocolNotEnoughFunds(address token);
 
     ////////////////////////
     // Events
     ////////////////////////
+    //@todo add event for update of global index
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
     event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
-    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);    
-    
+    event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);
+    event DebtRepayment(address indexed liquidator, uint256 indexed debtor, address indexed repaidAsset, uint256 amountLiquidated);
+    event AssetLiquidation(address indexed liquidator, uint256 indexed debtor, address indexed liquidatedAsset, uint256 amountLiquidated);
+
     ///////////////////////
     // Types & interfaces
     ///////////////////////
@@ -89,6 +93,7 @@ contract Desultory is IERC721Receiver
     mapping(uint256 position => mapping(address token => uint256 amount)) private __userCollaterals;
     mapping(uint256 position => Borrower info) private __userBorrows;
     mapping(address user => uint256 position) private __userPositions;
+    uint256 private __liquidationPenalty = 10;
 
     // Token Variables
     mapping(address token => Collateral info) private __tokenInfos;
@@ -218,6 +223,12 @@ contract Desultory is IERC721Receiver
         updateGlobalBorrowIndex(token);
 
         uint256 position = __userPositions[msg.sender];
+        if (position == 0 || __userCollaterals[position][token] == 0)
+        {
+            revert Desultory__NoDepositMade();
+        }
+
+        updateBorrowerDebt(token, position);
 
         uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[position].borrowedAmounts[token]);
         uint256 depositedAmount = __userCollaterals[position][token];
@@ -229,10 +240,11 @@ contract Desultory is IERC721Receiver
         {
             revert Desultory__WithdrawalWillViolateLTV();
         }
-        recordWithdrawal(token, amount);
-        
+
         __userCollaterals[position][token] -= amount;
-        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+
+        recordWithdrawal(token, amount);      
+        IERC20(token).safeTransfer(msg.sender, amount);
         emit Withdrawal(position, token, amount);
     }
 
@@ -258,22 +270,11 @@ contract Desultory is IERC721Receiver
             revert Desultory__ProtocolNotEnoughFunds(token);
         }
 
-        Borrower storage borrower = __userBorrows[position];
-        uint256 currentBorrowed = userBorrowedAmountUSD(position);
-        uint256 prevIndex = borrower.lastBorrowIndex[token];
-        uint256 currIndex = __globalBorrowIndex[token];
-
-        if (prevIndex > 0 && currIndex > prevIndex) 
-        {
-            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
-            currentBorrowed += getValueUSD(token, interestAccrued);
-
-            borrower.borrowedAmounts[token] += interestAccrued;
-            recordBorrow(token, interestAccrued);
-        }
+        updateBorrowerDebt(token, position);
 
         uint256 desiredUSD = getValueUSD(token, amount);
         uint256 availableUSD = userMaxBorrowValueUSD(position);
+        uint256 currentBorrowed = userBorrowedAmountUSD(position);
         if (currentBorrowed > 0) 
         {
             availableUSD -= currentBorrowed;
@@ -284,12 +285,12 @@ contract Desultory is IERC721Receiver
             revert Desultory__CollateralValueNotEnough();
         }
 
+        Borrower storage borrower = __userBorrows[position];
         borrower.borrowedAmounts[token] += amount;
         borrower.lastTimestamp = block.timestamp;
-        borrower.lastBorrowIndex[token] = currIndex;
 
         recordBorrow(token, amount);
-        IERC20(token).safeTransferFrom(address(this), msg.sender, amount);
+        IERC20(token).safeTransfer(msg.sender, amount);
         emit Borrow(position, token, amount);
     }
 
@@ -313,17 +314,8 @@ contract Desultory is IERC721Receiver
         {
             revert Desultory__NoExistingBorrow(token);
         }
-        
-        uint256 prevIndex = borrower.lastBorrowIndex[token];
-        uint256 currIndex = __globalBorrowIndex[token];
 
-        if (currIndex > prevIndex) 
-        {
-            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
-
-            borrower.borrowedAmounts[token] += interestAccrued;
-            recordBorrow(token, interestAccrued);
-        }
+        updateBorrowerDebt(token, position);
 
         if (amount > borrower.borrowedAmounts[token])
         {
@@ -332,11 +324,65 @@ contract Desultory is IERC721Receiver
 
         borrower.borrowedAmounts[token] -= amount;
         borrower.lastTimestamp = block.timestamp;
-        borrower.lastBorrowIndex[token] = currIndex;
 
         recordRepayment(token, amount);
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         emit Repayment(position, token, amount);
+    }
+    
+    function liquidateAssetPosition(uint256 position, address tokenToRepay, address tokenToLiquidate) external
+    {
+        uint256 borrowedValueUSD = userBorrowedAmountUSD(position);
+        uint256 maxBorrowValueUSD = userMaxBorrowValueUSD(position);
+
+        if (maxBorrowValueUSD > borrowedValueUSD)
+        {
+            revert Desultory__LTVRatioNotBroken();
+        }
+
+        uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
+        uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
+        if (liquidatorFunds >= totalDebt)
+        {
+            __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
+
+            uint256 collateralToTransfer = __userCollaterals[position][tokenToLiquidate] * (100 - __liquidationPenalty) / 100;
+            __userCollaterals[position][tokenToLiquidate] = __userCollaterals[position][tokenToLiquidate] - collateralToTransfer;
+
+            IERC20(tokenToRepay).safeTransferFrom(msg.sender, address(this), totalDebt);
+            IERC20(tokenToRepay).safeTransfer(msg.sender, collateralToTransfer);
+
+            emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
+            emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
+        }
+        else
+        {
+            //@todo call flash
+        }
+    }
+
+    // @todo
+    function liquidateProportionalPosition(uint256 position, address tokenToRepay) external
+    {
+        uint256 borrowedValueUSD = userBorrowedAmountUSD(position);
+        uint256 maxBorrowValueUSD = userMaxBorrowValueUSD(position);
+
+        if (maxBorrowValueUSD > borrowedValueUSD)
+        {
+            revert Desultory__LTVRatioNotBroken();
+        }
+
+        uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
+        uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
+
+        if (liquidatorFunds >= totalDebt)
+        {
+
+        }
+        else
+        {
+
+        }
     }
 
     function onERC721Received(address /*operator*/, address /*from*/, uint256 /*tokenId*/, bytes calldata /*data*/) external pure override returns (bytes4) 
@@ -449,6 +495,7 @@ contract Desultory is IERC721Receiver
         return (baseRate * __tokenInfos[token].borrowRate) / 100;
     }
 
+    // @note lower than 1e16 when collat is 1e18 and it will always return 0
     function getUtilization(address token) public view returns (uint16)
     {
         return uint16((__userBorrows[__protocolPositionId].borrowedAmounts[token] * 100) / __userCollaterals[__protocolPositionId][token]);
@@ -508,6 +555,21 @@ contract Desultory is IERC721Receiver
             __globalBorrowIndex[token] = 1e18;
             __lastUpdateTimestamp[token] = block.timestamp;
         }
+    }
+
+    function updateBorrowerDebt(address token, uint256 position) private
+    {
+        Borrower storage borrower = __userBorrows[position];
+        uint256 prevIndex = borrower.lastBorrowIndex[token];
+        uint256 currIndex = __globalBorrowIndex[token];
+
+        if (prevIndex > 0 && currIndex > prevIndex) 
+        {
+            uint256 interestAccrued = (borrower.borrowedAmounts[token] * (currIndex - prevIndex)) / prevIndex;
+            borrower.borrowedAmounts[token] += interestAccrued;
+            recordBorrow(token, interestAccrued);
+        }
+        borrower.lastBorrowIndex[token] = currIndex;
     }
 
     ///////////////////////
