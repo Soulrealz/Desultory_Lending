@@ -35,6 +35,7 @@ contract Desultory is IERC721Receiver
     ////////////////////////
     // Events
     ////////////////////////
+    //@todo add event for update of global index
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
     event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
@@ -494,6 +495,7 @@ contract Desultory is IERC721Receiver
         return (baseRate * __tokenInfos[token].borrowRate) / 100;
     }
 
+    // @note lower than 1e16 when collat is 1e18 and it will always return 0
     function getUtilization(address token) public view returns (uint16)
     {
         return uint16((__userBorrows[__protocolPositionId].borrowedAmounts[token] * 100) / __userCollaterals[__protocolPositionId][token]);
