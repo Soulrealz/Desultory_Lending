@@ -79,6 +79,8 @@ contract DesultoryTest is Test {
 
         vm.prank(alice);
         vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, 1e18);
+        vm.expectEmit(true, true, true, true);
         emit Desultory.Deposit(alice, expectedPosition, weth, depositAmount);
         desultory.deposit(weth, depositAmount);
 
@@ -141,6 +143,8 @@ contract DesultoryTest is Test {
 
         vm.startPrank(alice);
 
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, 1e18);
         desultory.deposit(weth, depositAmount);
 
         // @note why 4 true instead of 3?
@@ -192,6 +196,8 @@ contract DesultoryTest is Test {
 
         vm.startPrank(alice);
 
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, 1e18);
         desultory.deposit(weth, depositAmount);
         uint256 balAfterDeposit = MockERC20(weth).balanceOf(alice);
         uint256 contractBalAfterDeposit = MockERC20(weth).balanceOf(address(desultory));
@@ -207,5 +213,50 @@ contract DesultoryTest is Test {
         assertEq(50, util);
         assertEq(balAfterDeposit + borrowAmount, MockERC20(weth).balanceOf(alice));
         assertEq(contractBalAfterDeposit - borrowAmount, MockERC20(weth).balanceOf(address(desultory)));
+    }
+
+    ///////////////////////
+    // Repay Tests
+    ///////////////////////
+    // @todo multiasset multiuser repay with time passes (fuzzable)
+    function testRepayReverts() public
+    {
+        vm.startPrank(alice);
+
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.repay(weth, zeroAmount);
+
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__TokenNotWhitelisted.selector, dead));
+        desultory.repay(dead, 1);
+
+        vm.expectRevert(Desultory.Desultory__NoDepositMade.selector);
+        desultory.repay(weth, 1);
+
+        desultory.deposit(weth, 1);
+
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__NoExistingBorrow.selector, weth));
+        desultory.repay(weth, 1);
+
+        vm.stopPrank();
+    }
+
+    function testRepay() public
+    {
+        uint256 depositAmount = 1e18;
+        uint256 borrowAmount = 5e17;
+        uint256 expectedPosition = 2;
+
+        vm.startPrank(alice);
+
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, 1e18);
+        desultory.deposit(weth, depositAmount);
+        desultory.borrow(weth, borrowAmount);
+
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.Repayment(expectedPosition, weth, borrowAmount / 2);
+        desultory.repay(weth, borrowAmount / 2);
+
+        vm.stopPrank();
     }
 }
