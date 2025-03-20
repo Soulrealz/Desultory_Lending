@@ -35,6 +35,7 @@ contract Desultory is IERC721Receiver {
     // Events
     ////////////////////////
     //@todo add event for update of global index
+    event IndexUpdate(address indexed token, uint256 timestamp, uint256 index);
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
     event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
@@ -512,6 +513,8 @@ contract Desultory is IERC721Receiver {
             __globalBorrowIndex[token] = 1e18;
             __lastUpdateTimestamp[token] = block.timestamp;
         }
+
+        emit IndexUpdate(token, block.timestamp, __globalBorrowIndex[token]);
     }
 
     function updateBorrowerDebt(address token, uint256 position) private {
