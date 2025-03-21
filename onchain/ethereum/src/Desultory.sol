@@ -31,6 +31,9 @@ contract Desultory is IERC721Receiver {
     error Desultory__ProtocolPositionAlreadyInitialized();
     error Desultory__ProtocolNotEnoughFunds(address token);
 
+    //@dev
+    error NotImplemented();
+
     ////////////////////////
     // Events
     ////////////////////////
@@ -56,6 +59,9 @@ contract Desultory is IERC721Receiver {
     ////////////////////////
     // Structs
     ////////////////////////
+
+    // @note Add trusted/untrusted asset?
+    // if trusted can be used for various things
     struct Collateral {
         address priceFeed;
         uint8 decimals;
@@ -87,12 +93,14 @@ contract Desultory is IERC721Receiver {
 
     // Protocol Variables
     uint256 private constant __protocolPositionId = 1;
+    mapping(address token => uint256 amount) private __profit;
 
     // Position Related User Variables
     mapping(uint256 position => mapping(address token => uint256 amount)) private __userCollaterals;
     mapping(uint256 position => Borrower info) private __userBorrows;
     mapping(address user => uint256 position) private __userPositions;
     uint256 private __liquidationPenalty = 10;
+    uint256 private __liquidationPenaltyProtocol = 3;
 
     // Token Variables
     mapping(address token => Collateral info) private __tokenInfos;
@@ -324,27 +332,37 @@ contract Desultory is IERC721Receiver {
             revert Desultory__LTVRatioNotBroken();
         }
 
+        uint256 collateralToTransfer = getAssetCollateralToTransfer(position, tokenToRepay, tokenToLiquidate);
         uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
         uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
-        if (liquidatorFunds >= totalDebt) {
-            __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
-
-            uint256 collateralToTransfer =
-                __userCollaterals[position][tokenToLiquidate] * (100 - __liquidationPenalty) / 100;
-            __userCollaterals[position][tokenToLiquidate] =
-                __userCollaterals[position][tokenToLiquidate] - collateralToTransfer;
-
+        if (liquidatorFunds >= totalDebt) {           
             IERC20(tokenToRepay).safeTransferFrom(msg.sender, address(this), totalDebt);
             IERC20(tokenToRepay).safeTransfer(msg.sender, collateralToTransfer);
 
             emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
             emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
-        } else {
-            //@todo call flash
+        } else {            
+            if (IERC20(tokenToRepay).balanceOf(address(this) >= totalDebt)) {
+                uint256 protocolLiquidationReward = collateralToTransfer * __liquidationPenaltyProtocol / 100;
+
+                __profit[tokenToLiquidate] += collateralToTransfer - protocolLiquidationReward;
+                IERC20(tokenToRepay).safeTransfer(msg.sender, protocolLiquidationReward);
+
+                emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
+                emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
+
+                //@todo trusted untrusted asset
+                // if untrusted convert profit to USDC to preserve value
+            } else {
+                //@todo call flash
+                revert NotImplemented();
+            }
         }
+
+        emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
+        emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
     }
 
-    // @todo
     function liquidateProportionalPosition(uint256 position, address tokenToRepay) external {
         uint256 borrowedValueUSD = userBorrowedAmountUSD(position);
         uint256 maxBorrowValueUSD = userMaxBorrowValueUSD(position);
@@ -356,7 +374,42 @@ contract Desultory is IERC721Receiver {
         uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
         uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
 
-        if (liquidatorFunds >= totalDebt) {} else {}
+        if (liquidatorFunds >= totalDebt) {
+            __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
+
+            address[] memory collateralTokens = new address[](__supportedTokensCount);
+            uint256 totalCollateralUSD = 0;
+            uint256 collatNumber = 0;
+
+            for (uint256 i = 0; i < __supportedTokensCount; i++) {
+                address collateralToken = __tokenList[i];
+                uint256 collateralAmount = __userCollaterals[position][collateralToken];
+
+                if (collateralAmount > 0) {
+                    collateralTokens[collatNumber++] = collateralToken;
+                    totalCollateralUSD += getValueUSD(collateralToken, collateralAmount);
+                }
+            }
+
+            uint256 liquidationValueUSD = getValueUSD(tokenToRepay, totalDebt) * (100 - __liquidationPenalty) / 100;
+
+            for (uint256 i = 0; i < collatNumber; i++) {
+                address collateralToken = collateralTokens[i];
+                uint256 collateralAmount = __userCollaterals[position][collateralToken];
+
+                uint256 collateralValueUSD = getValueUSD(collateralToken, collateralAmount);
+                uint256 proportion = (collateralValueUSD * 1e18) / totalCollateralUSD;
+                // @note what if 0.1 eth? it will be valued at 100$ while getValueUSD will return 1k?
+                uint256 amountToLiquidate = (liquidationValueUSD * proportion / 1e18) / getValueUSD(collateralToken, 10 ** __tokenInfos[collateralToken].decimals);
+
+                __userCollaterals[position][collateralToken] -= amountToLiquidate;
+
+                IERC20(collateralToken).transfer(msg.sender, amountToLiquidate);
+            }
+        } else {
+            //@todo call flash
+            revert NotImplemented();
+        }
     }
 
     function onERC721Received(address, /*operator*/ address, /*from*/ uint256, /*tokenId*/ bytes calldata /*data*/ )
@@ -382,9 +435,9 @@ contract Desultory is IERC721Receiver {
         (, int256 price,,,) = priceFeed.staleCheckLatestRoundData();
 
         uint256 adjustedPrice = uint256(price) * (10 ** (18 - collat.decimals));
-        uint256 adjustedAmount = amount * (10 ** (18 - collat.decimals));
+        //uint256 adjustedAmount = amount * (10 ** (18 - collat.decimals));
 
-        return (adjustedAmount * adjustedPrice) / 1e18;
+        return (amount * adjustedPrice) / 1e18;
     }
 
     function userBorrowedAmountUSD(uint256 position) public view returns (uint256) {
@@ -528,6 +581,16 @@ contract Desultory is IERC721Receiver {
             recordBorrow(token, interestAccrued);
         }
         borrower.lastBorrowIndex[token] = currIndex;
+    }
+
+    function getAssetCollateralToTransfer(uint256 position, address tokenToRepay, address tokenToLiquidate) private returns (uint256 collateralToTransfer) {
+        __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
+
+        collateralToTransfer =
+            __userCollaterals[position][tokenToLiquidate] * (100 - __liquidationPenalty) / 100;
+
+        __userCollaterals[position][tokenToLiquidate] =
+            __userCollaterals[position][tokenToLiquidate] - collateralToTransfer;
     }
 
     ///////////////////////
