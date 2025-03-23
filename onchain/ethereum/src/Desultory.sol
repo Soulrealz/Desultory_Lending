@@ -1,7 +1,5 @@
 pragma solidity 0.8.28;
 
-import {console} from "forge-std/Test.sol";
-
 // Libs
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -429,6 +427,10 @@ contract Desultory is IERC721Receiver {
         return __userCollaterals[position][token];
     }
 
+    function getPositionBorrowForToken(uint256 position, address token) public view returns (uint256) {
+        return __userBorrows[position].borrowedAmounts[token];
+    }
+
     function getValueUSD(address token, uint256 amount) public view returns (uint256) {
         Collateral memory collat = __tokenInfos[token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(collat.priceFeed);
@@ -473,9 +475,9 @@ contract Desultory is IERC721Receiver {
         return totalUSD;
     }
 
-    function getBorrowRate(address token, uint16 utilization) public view returns (uint16) {
+    function getBorrowRate(address token, uint16 utilization) public view returns (uint32) {
         Interest memory interest = __interest;
-        uint16 baseRate;
+        uint32 baseRate;
 
         // Very Low Utilization Case
         // FB = B + (U * L / Lu)
@@ -485,8 +487,8 @@ contract Desultory is IERC721Receiver {
         // Normal Utilization Case
         // FB = B + L + ((U - Lu) * (N - L) / (Nu - Lu))
         else if (utilization <= interest.normalUtilization) {
-            uint16 excessUtilization = utilization - interest.lowUtilization;
-            uint16 utilizationGap = interest.normalUtilization - interest.lowUtilization;
+            uint32 excessUtilization = utilization - interest.lowUtilization;
+            uint32 utilizationGap = interest.normalUtilization - interest.lowUtilization;
 
             baseRate = interest.baseBorrowRate + interest.lowBorrowRate
                 + (excessUtilization * (interest.normalBorrowRate - interest.lowBorrowRate) / utilizationGap);
@@ -494,8 +496,8 @@ contract Desultory is IERC721Receiver {
         // High Utilization Case
         // FB = B + N + ((U - Nu) * (H - N) / (Hu - Nu))
         else if (utilization <= interest.highUtilization) {
-            uint16 excessUtilization = utilization - interest.normalUtilization;
-            uint16 utilizationGap = interest.highUtilization - interest.normalUtilization;
+            uint32 excessUtilization = utilization - interest.normalUtilization;
+            uint32 utilizationGap = interest.highUtilization - interest.normalUtilization;
 
             baseRate = interest.baseBorrowRate + interest.normalBorrowRate
                 + (excessUtilization * (interest.highBorrowRate - interest.normalBorrowRate) / utilizationGap);
@@ -503,8 +505,8 @@ contract Desultory is IERC721Receiver {
         // Extreme Utilization Case
         // FB = B + H + ((U - Hu) * (E - H) / (Eu - Hu))
         else {
-            uint16 excessUtilization = utilization - interest.highUtilization;
-            uint16 utilizationGap = interest.extremeUtilization - interest.highUtilization;
+            uint32 excessUtilization = utilization - interest.highUtilization;
+            uint32 utilizationGap = interest.extremeUtilization - interest.highUtilization;
 
             baseRate = interest.baseBorrowRate + interest.highBorrowRate
                 + (excessUtilization * (interest.extremeBorrowRate - interest.highBorrowRate) / utilizationGap);
@@ -513,12 +515,16 @@ contract Desultory is IERC721Receiver {
         return (baseRate * __tokenInfos[token].borrowRate) / 100;
     }
 
-    // @note lower than 1e16 when collat is 1e18 and it will always return 0
+    // @note lower than 1e13 when collat is 1e18 and it will always return 0
     function getUtilization(address token) public view returns (uint16) {
         return uint16(
-            (__userBorrows[__protocolPositionId].borrowedAmounts[token] * 100)
+            (__userBorrows[__protocolPositionId].borrowedAmounts[token] * MAX_BPS)
                 / __userCollaterals[__protocolPositionId][token]
         );
+    }
+
+    function getPriceFeedForToken(address token) public view returns (address) {
+        return __tokenInfos[token].priceFeed;
     }
 
     ///////////////////////
@@ -557,7 +563,7 @@ contract Desultory is IERC721Receiver {
             uint256 timeElapsed = block.timestamp - __lastUpdateTimestamp[token];
             if (timeElapsed == 0) return;
 
-            uint16 borrowRate = getBorrowRate(token, getUtilization(token));
+            uint32 borrowRate = getBorrowRate(token, getUtilization(token));
             uint256 interestFactor = ((borrowRate * timeElapsed * 1e18) / (SECONDS_PER_YEAR * MAX_BPS));
 
             __globalBorrowIndex[token] += (__globalBorrowIndex[token] * interestFactor) / 1e18;

@@ -7,6 +7,7 @@ import {Position} from "../src/PositionNFT.sol";
 import {DUSD} from "../src/DUSD.sol";
 import {Deploy} from "../script/Deploy.s.sol";
 import "./mocks/MockERC20.sol";
+import "./mocks/MockV3Aggregator.sol";
 
 import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
@@ -210,17 +211,60 @@ contract DesultoryTest is Test {
 
         uint256 util = desultory.getUtilization(weth);
 
-        assertEq(50, util);
+        assertEq(5000, util);
         assertEq(balAfterDeposit + borrowAmount, MockERC20(weth).balanceOf(alice));
         assertEq(contractBalAfterDeposit - borrowAmount, MockERC20(weth).balanceOf(address(desultory)));
+    }
+
+    function testBorrowAfterTime() public {
+        uint256 depositAmount = 1e18;
+        uint256 borrowAmount = 5e17;
+        uint256 expectedPosition = 2;
+
+        vm.startPrank(alice);
+
+        desultory.deposit(weth, depositAmount);
+        skip(1 days);
+        MockV3Aggregator(desultory.getPriceFeedForToken(weth)).updateAnswer(2005 * 1e8);
+        MockV3Aggregator(desultory.getPriceFeedForToken(usdc)).updateAnswer(1 * 1e6);
+
+        uint256 rate = 400;
+        uint256 num = (rate * 1 days * 1e18);
+        uint256 denum = (365 days * 10_000);
+        uint256 interest = (num / denum);
+        uint256 index = 1e18 + (1e18 * interest / 1e18);
+
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, index);
+        desultory.borrow(weth, borrowAmount);
+        
+        skip(1 days);
+        MockV3Aggregator(desultory.getPriceFeedForToken(weth)).updateAnswer(2005 * 1e8);
+        MockV3Aggregator(desultory.getPriceFeedForToken(usdc)).updateAnswer(1 * 1e6);
+
+        rate = 300; // low + base
+        uint256 excess = 3500;
+        uint256 gap = 6500;
+        uint256 calcRate = rate + (excess * 500) / gap;
+        uint256 finalRate = (calcRate * 400) / 100;
+        num = (finalRate * 1 days * 1e18);
+        interest = num / denum;
+        index = index + (index * interest / 1e18);
+
+        vm.expectEmit(true, true, true, true);
+        emit Desultory.IndexUpdate(weth, block.timestamp, index);
+        desultory.borrow(weth, borrowAmount / 5);
+
+        uint256 totalBorrow = desultory.getPositionBorrowForToken(expectedPosition, weth);
+
+        vm.stopPrank();
     }
 
     ///////////////////////
     // Repay Tests
     ///////////////////////
     // @todo multiasset multiuser repay with time passes (fuzzable)
-    function testRepayReverts() public
-    {
+    function testRepayReverts() public {
         vm.startPrank(alice);
 
         vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
@@ -240,8 +284,7 @@ contract DesultoryTest is Test {
         vm.stopPrank();
     }
 
-    function testRepay() public
-    {
+    function testRepay() public {
         uint256 depositAmount = 1e18;
         uint256 borrowAmount = 5e17;
         uint256 expectedPosition = 2;
