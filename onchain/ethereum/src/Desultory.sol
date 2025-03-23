@@ -1,7 +1,5 @@
 pragma solidity 0.8.28;
 
-import {console} from "forge-std/Test.sol";
-
 // Libs
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -376,6 +374,10 @@ contract Desultory is IERC721Receiver {
         return __userCollaterals[position][token];
     }
 
+    function getPositionBorrowForToken(uint256 position, address token) public view returns (uint256) {
+        return __userBorrows[position].borrowedAmounts[token];
+    }
+
     function getValueUSD(address token, uint256 amount) public view returns (uint256) {
         Collateral memory collat = __tokenInfos[token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(collat.priceFeed);
@@ -513,7 +515,6 @@ contract Desultory is IERC721Receiver {
 
             __globalBorrowIndex[token] += (__globalBorrowIndex[token] * interestFactor) / 1e18;
             __lastUpdateTimestamp[token] = block.timestamp;
-            console.log("__globalBorrowIndex[token]: ", __globalBorrowIndex[token]);
         } else {
             __globalBorrowIndex[token] = 1e18;
             __lastUpdateTimestamp[token] = block.timestamp;
