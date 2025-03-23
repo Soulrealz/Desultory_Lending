@@ -255,7 +255,7 @@ contract DesultoryTest is Test {
         emit Desultory.IndexUpdate(weth, block.timestamp, index);
         desultory.borrow(weth, borrowAmount / 5);
 
-        uint256 totalBorrow = desultory.getPositionBorrowForToken(expectedPosition, weth);
+        //uint256 totalBorrow = desultory.getPositionBorrowForToken(expectedPosition, weth);
 
         vm.stopPrank();
     }

@@ -330,25 +330,18 @@ contract Desultory is IERC721Receiver {
             revert Desultory__LTVRatioNotBroken();
         }
 
-        uint256 collateralToTransfer = getAssetCollateralToTransfer(position, tokenToRepay, tokenToLiquidate);
+        uint256 collateralToTransfer = settleDebtSeizeCollateral(position, tokenToRepay, tokenToLiquidate);
         uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
         uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
-        if (liquidatorFunds >= totalDebt) {           
+        if (liquidatorFunds >= totalDebt) {
             IERC20(tokenToRepay).safeTransferFrom(msg.sender, address(this), totalDebt);
             IERC20(tokenToRepay).safeTransfer(msg.sender, collateralToTransfer);
-
-            emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
-            emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
-        } else {            
-            if (IERC20(tokenToRepay).balanceOf(address(this) >= totalDebt)) {
+        } else {
+            if (IERC20(tokenToRepay).balanceOf(address(this)) >= totalDebt) {
                 uint256 protocolLiquidationReward = collateralToTransfer * __liquidationPenaltyProtocol / 100;
 
                 __profit[tokenToLiquidate] += collateralToTransfer - protocolLiquidationReward;
                 IERC20(tokenToRepay).safeTransfer(msg.sender, protocolLiquidationReward);
-
-                emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
-                emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
-
                 //@todo trusted untrusted asset
                 // if untrusted convert profit to USDC to preserve value
             } else {
@@ -369,41 +362,22 @@ contract Desultory is IERC721Receiver {
             revert Desultory__LTVRatioNotBroken();
         }
 
-        uint256 totalDebt = __userBorrows[position].borrowedAmounts[tokenToRepay];
+        Borrower storage borrower = __userBorrows[position];
+        uint256 totalDebt = borrower.borrowedAmounts[tokenToRepay];
         uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
 
         if (liquidatorFunds >= totalDebt) {
-            __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
+            borrower.borrowedAmounts[tokenToRepay] = 0;
 
-            address[] memory collateralTokens = new address[](__supportedTokensCount);
-            uint256 totalCollateralUSD = 0;
-            uint256 collatNumber = 0;
-
-            for (uint256 i = 0; i < __supportedTokensCount; i++) {
-                address collateralToken = __tokenList[i];
-                uint256 collateralAmount = __userCollaterals[position][collateralToken];
-
-                if (collateralAmount > 0) {
-                    collateralTokens[collatNumber++] = collateralToken;
-                    totalCollateralUSD += getValueUSD(collateralToken, collateralAmount);
-                }
-            }
+            (address[] memory collateralTokens, uint256 totalCollateralUSD) = getPositionFullCollateralData(position);
 
             uint256 liquidationValueUSD = getValueUSD(tokenToRepay, totalDebt) * (100 - __liquidationPenalty) / 100;
 
-            for (uint256 i = 0; i < collatNumber; i++) {
-                address collateralToken = collateralTokens[i];
-                uint256 collateralAmount = __userCollaterals[position][collateralToken];
+            processCollateralLiquidation(
+                position, collateralTokens, totalCollateralUSD, liquidationValueUSD, msg.sender
+            );
 
-                uint256 collateralValueUSD = getValueUSD(collateralToken, collateralAmount);
-                uint256 proportion = (collateralValueUSD * 1e18) / totalCollateralUSD;
-                // @note what if 0.1 eth? it will be valued at 100$ while getValueUSD will return 1k?
-                uint256 amountToLiquidate = (liquidationValueUSD * proportion / 1e18) / getValueUSD(collateralToken, 10 ** __tokenInfos[collateralToken].decimals);
-
-                __userCollaterals[position][collateralToken] -= amountToLiquidate;
-
-                IERC20(collateralToken).transfer(msg.sender, amountToLiquidate);
-            }
+            emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
         } else {
             //@todo call flash
             revert NotImplemented();
@@ -429,6 +403,30 @@ contract Desultory is IERC721Receiver {
 
     function getPositionBorrowForToken(uint256 position, address token) public view returns (uint256) {
         return __userBorrows[position].borrowedAmounts[token];
+    }
+
+    function getPositionFullCollateralData(uint256 position)
+        public
+        view
+        returns (address[] memory tokens, uint256 totalUSD)
+    {
+        tokens = new address[](__supportedTokensCount);
+        totalUSD = 0;
+        uint256 collatNumber = 0;
+
+        for (uint256 i = 0; i < __supportedTokensCount; i++) {
+            address collateralToken = __tokenList[i];
+            uint256 collateralAmount = __userCollaterals[position][collateralToken];
+
+            if (collateralAmount > 0) {
+                tokens[collatNumber++] = collateralToken;
+                totalUSD += getValueUSD(collateralToken, collateralAmount);
+            }
+        }
+
+        assembly {
+            mstore(tokens, collatNumber)
+        }
     }
 
     function getValueUSD(address token, uint256 amount) public view returns (uint256) {
@@ -458,7 +456,10 @@ contract Desultory is IERC721Receiver {
         for (uint256 i = 0; i < __supportedTokensCount; i++) {
             address token = __tokenList[i];
             uint256 amount = __userCollaterals[position][token];
-            totalUSD += getValueUSD(token, amount);
+
+            if (amount > 0) {
+                totalUSD += getValueUSD(token, amount);
+            }
         }
 
         return totalUSD;
@@ -589,14 +590,39 @@ contract Desultory is IERC721Receiver {
         borrower.lastBorrowIndex[token] = currIndex;
     }
 
-    function getAssetCollateralToTransfer(uint256 position, address tokenToRepay, address tokenToLiquidate) private returns (uint256 collateralToTransfer) {
+    function settleDebtSeizeCollateral(uint256 position, address tokenToRepay, address tokenToLiquidate)
+        private
+        returns (uint256 collateralToTransfer)
+    {
         __userBorrows[position].borrowedAmounts[tokenToRepay] = 0;
 
-        collateralToTransfer =
-            __userCollaterals[position][tokenToLiquidate] * (100 - __liquidationPenalty) / 100;
+        collateralToTransfer = __userCollaterals[position][tokenToLiquidate] * (100 - __liquidationPenalty) / 100;
 
         __userCollaterals[position][tokenToLiquidate] =
             __userCollaterals[position][tokenToLiquidate] - collateralToTransfer;
+    }
+
+    function processCollateralLiquidation(
+        uint256 position,
+        address[] memory collateralTokens,
+        uint256 totalCollateralUSD,
+        uint256 liquidationValueUSD,
+        address liquidator
+    ) private {
+        for (uint256 i = 0; i < collateralTokens.length; i++) {
+            address collateralToken = collateralTokens[i];
+            uint256 collateralAmount = __userCollaterals[position][collateralToken];
+
+            uint256 proportion = getValueUSD(collateralToken, collateralAmount) / totalCollateralUSD;
+
+            uint256 amountToLiquidate = (liquidationValueUSD * proportion)
+                / getValueUSD(collateralToken, 10 ** __tokenInfos[collateralToken].decimals);
+
+            __userCollaterals[position][collateralToken] -= amountToLiquidate;
+            IERC20(collateralToken).transfer(liquidator, amountToLiquidate);
+
+            emit AssetLiquidation(msg.sender, position, collateralToken, amountToLiquidate);
+        }
     }
 
     ///////////////////////
