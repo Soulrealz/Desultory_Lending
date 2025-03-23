@@ -35,7 +35,6 @@ contract Desultory is IERC721Receiver {
     ////////////////////////
     // Events
     ////////////////////////
-    //@todo add event for update of global index
     event IndexUpdate(address indexed token, uint256 timestamp, uint256 index);
     event Borrow(uint256 indexed position, address indexed token, uint256 amount);
     event Repayment(uint256 indexed position, address indexed token, uint256 amount);
@@ -63,8 +62,8 @@ contract Desultory is IERC721Receiver {
     struct Collateral {
         address priceFeed;
         uint8 decimals;
-        uint8 ltvRatio;
-        uint16 borrowRate;
+        uint8 ltvRatio; // Loan To Value ratio that this asset provides
+        uint16 borrowRate;  // Default fee for asset
     }
 
     struct Interest {
@@ -80,8 +79,8 @@ contract Desultory is IERC721Receiver {
     }
 
     struct Borrower {
-        uint256 lastTimestamp;
-        mapping(address token => uint256 index) lastBorrowIndex;
+        uint256 lastTimestamp;  // Last borrow timestamp
+        mapping(address token => uint256 index) lastBorrowIndex;    // Per Token last global borrow index
         mapping(address token => uint256 amount) borrowedAmounts;
     }
 
@@ -105,6 +104,7 @@ contract Desultory is IERC721Receiver {
     mapping(uint256 tokenId => address token) private __tokenList;
     uint256 private __supportedTokensCount;
 
+    // @todo
     // DUSD Variables
     uint256 private __protocolDebtInDUSD;
     uint256 private __totalFeesGenerated;
@@ -180,6 +180,9 @@ contract Desultory is IERC721Receiver {
         });
     }
 
+    /**
+     * @dev Save the first position for the protocol
+     */
     function initializeProtocolPosition() external {
         if (__userPositions[address(this)] != 0) {
             revert Desultory__ProtocolPositionAlreadyInitialized();
@@ -250,12 +253,12 @@ contract Desultory is IERC721Receiver {
     }
 
     // @note to make a borrow for DUSD? is it necessary?
-    // @note make a borrow for ETH
-    // function borrow(uint256 amount) external moreThanZero(amount)
-    // {
-    //     this.borrow(address(__DUSD), amount);
-    // }
 
+    /**
+     * @dev function to borrow given token
+     * @param token which token to borrow
+     * @param amount how much of that token to borrow
+     */
     function borrow(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token) {
         updateGlobalBorrowIndex(token);
 
@@ -291,10 +294,14 @@ contract Desultory is IERC721Receiver {
     }
 
     // @note withdrawMulti ? for multi token withdrawal
-    // @note payAndWithdraw
+    // @todo payAndWithdraw
+    // @todo will allow others to repay your debt
 
-    // @todo
-    // will allow others to repay your debt
+    /**
+     * @dev function that allows position owners to repay their owed debt
+     * @param token which token to repay their debt for
+     * @param amount how much of it to repay
+     */
     function repay(address token, uint256 amount) external moreThanZero(amount) isAllowedToken(token) {
         updateGlobalBorrowIndex(token);
 
@@ -322,6 +329,13 @@ contract Desultory is IERC721Receiver {
         emit Repayment(position, token, amount);
     }
 
+    /**
+     * @dev function for the liquidation of a specific asset in a given position given a breached LTV ratio
+     * Liquidators can use their own funds or the protocol's funds to liquidate
+     * @param position which position to liquidate the asset for
+     * @param tokenToRepay which token to repay the debt for (aka borrowed token)
+     * @param tokenToLiquidate which token to liquidate from the collateral
+     */
     function liquidateAssetPosition(uint256 position, address tokenToRepay, address tokenToLiquidate) external {
         uint256 borrowedValueUSD = userBorrowedAmountUSD(position);
         uint256 maxBorrowValueUSD = userMaxBorrowValueUSD(position);
@@ -354,6 +368,12 @@ contract Desultory is IERC721Receiver {
         emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
     }
 
+    /**
+     * @dev function that allows the liquidation of all assets in the position proportionally (eg: 20% each of an asset)
+     * Liquidators can use their own funds
+     * @param position which position to liquidate
+     * @param tokenToRepay which token to repay the debt for (aka borrowed token)
+     */
     function liquidateProportionalPosition(uint256 position, address tokenToRepay) external {
         uint256 borrowedValueUSD = userBorrowedAmountUSD(position);
         uint256 maxBorrowValueUSD = userMaxBorrowValueUSD(position);
@@ -366,6 +386,7 @@ contract Desultory is IERC721Receiver {
         uint256 totalDebt = borrower.borrowedAmounts[tokenToRepay];
         uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
 
+        // @note allow the use of the protocol's funds to liquidate?
         if (liquidatorFunds >= totalDebt) {
             borrower.borrowedAmounts[tokenToRepay] = 0;
 
@@ -381,7 +402,7 @@ contract Desultory is IERC721Receiver {
         } else {
             //@todo call flash
             revert NotImplemented();
-        }
+        }        
     }
 
     function onERC721Received(address, /*operator*/ address, /*from*/ uint256, /*tokenId*/ bytes calldata /*data*/ )
@@ -405,6 +426,12 @@ contract Desultory is IERC721Receiver {
         return __userBorrows[position].borrowedAmounts[token];
     }
 
+    /**
+     * @dev Get the full details of a position
+     * @param position which position to get the info for
+     * @return tokens an array of collateral tokens associated with the position
+     * @return totalUSD the total value of all assets in USD
+     */
     function getPositionFullCollateralData(uint256 position)
         public
         view
@@ -429,6 +456,11 @@ contract Desultory is IERC721Receiver {
         }
     }
 
+    /**
+     * @dev get USD value of token amount
+     * @param token which token to get the USD value of
+     * @param amount how much of that token to get the value for
+     */
     function getValueUSD(address token, uint256 amount) public view returns (uint256) {
         Collateral memory collat = __tokenInfos[token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(collat.priceFeed);
@@ -440,6 +472,10 @@ contract Desultory is IERC721Receiver {
         return (amount * adjustedPrice) / 1e18;
     }
 
+    /**
+     * @dev get a position's total debt in USD
+     * @param position which position to get the debt for
+     */
     function userBorrowedAmountUSD(uint256 position) public view returns (uint256) {
         uint256 totalUSD;
         for (uint256 i = 0; i < __supportedTokensCount; i++) {
@@ -451,6 +487,10 @@ contract Desultory is IERC721Receiver {
         return totalUSD;
     }
 
+    /**
+     * @dev get a position's total collateral value in USD
+     * @param position which position to get the collateral value of
+     */
     function userCollateralValueUSD(uint256 position) public view returns (uint256) {
         uint256 totalUSD;
         for (uint256 i = 0; i < __supportedTokensCount; i++) {
@@ -465,7 +505,12 @@ contract Desultory is IERC721Receiver {
         return totalUSD;
     }
 
+    /**
+     * @dev how much a position can max borrow, not including any current borrows
+     * @param position which position to get the max borrow for
+     */
     function userMaxBorrowValueUSD(uint256 position) public view returns (uint256) {
+        // @note add update debt here?
         uint256 totalUSD;
         for (uint256 i = 0; i < __supportedTokensCount; i++) {
             address token = __tokenList[i];
@@ -476,6 +521,18 @@ contract Desultory is IERC721Receiver {
         return totalUSD;
     }
 
+    /**
+     * @dev get the dynamic borrow rate of a token based on its utilization.
+     * Currently split into 4 tiers - Very Low, Normal, High and Extreme utilization
+     * Each tier covers different utilization percentages (eg from 0 to 15% for Very Low)
+     * Each tier has a different borrow rate depending on the utilization tier
+     * 
+     * FB = Final rate, B = Base rate, L  = Low, N  = Normal, H  = High, E  = Extreme
+     * U = Utilization,                Lu = Low, Nu = Normal, Hu = High, Eu = Extreme
+     * 
+     * @param token which token to get the rate of
+     * @param utilization the utilization rate of the given token
+     */
     function getBorrowRate(address token, uint16 utilization) public view returns (uint32) {
         Interest memory interest = __interest;
         uint32 baseRate;
@@ -517,6 +574,10 @@ contract Desultory is IERC721Receiver {
     }
 
     // @note lower than 1e13 when collat is 1e18 and it will always return 0
+    /**
+     * @dev Get the utilization for the given token given borrow amount against provided amount
+     * @param token which token to get the util for
+     */
     function getUtilization(address token) public view returns (uint16) {
         return uint16(
             (__userBorrows[__protocolPositionId].borrowedAmounts[token] * MAX_BPS)
@@ -532,6 +593,10 @@ contract Desultory is IERC721Receiver {
     // Private Functions
     ///////////////////////
 
+    /**
+     * @dev create a position for a new user upon first deposit
+     * @return ID of the new position
+     */
     function createPosition() private returns (uint256) {
         uint256 newPosition = __positionContract.mint(msg.sender);
         __userPositions[msg.sender] = newPosition;
@@ -539,8 +604,8 @@ contract Desultory is IERC721Receiver {
     }
 
     /**
-     * @dev functions to keep track of the assets
-     * in the protocol and how they're used
+     * @dev functions to keep track of the assets in the protocol
+     * and all movements regarding them
      */
     function recordDeposit(address token, uint256 amount) private {
         __userCollaterals[__protocolPositionId][token] += amount;
@@ -559,6 +624,10 @@ contract Desultory is IERC721Receiver {
     }
     ///////////////////////////////////////////////////////////////////////////////
 
+    /**
+     * @dev function that updates the global index for a given token thus accumulating fees
+     * @param token which token to update the index for
+     */
     function updateGlobalBorrowIndex(address token) private {
         if (__lastUpdateTimestamp[token] != 0) {
             uint256 timeElapsed = block.timestamp - __lastUpdateTimestamp[token];
@@ -577,6 +646,11 @@ contract Desultory is IERC721Receiver {
         emit IndexUpdate(token, block.timestamp, __globalBorrowIndex[token]);
     }
 
+    /**
+     * @dev sync a borrower's debt with any changes to the global index
+     * @param token which token to update the debt for
+     * @param position which position to update it for
+     */
     function updateBorrowerDebt(address token, uint256 position) private {
         Borrower storage borrower = __userBorrows[position];
         uint256 prevIndex = borrower.lastBorrowIndex[token];
@@ -590,6 +664,12 @@ contract Desultory is IERC721Receiver {
         borrower.lastBorrowIndex[token] = currIndex;
     }
 
+    /**
+     * @dev Clear a position's debt and reduce collateral according to a penalty
+     * @param position which position to do that for
+     * @param tokenToRepay which borrowed token is being cleared
+     * @param tokenToLiquidate which collateral to liquidate
+     */
     function settleDebtSeizeCollateral(uint256 position, address tokenToRepay, address tokenToLiquidate)
         private
         returns (uint256 collateralToTransfer)
@@ -602,6 +682,14 @@ contract Desultory is IERC721Receiver {
             __userCollaterals[position][tokenToLiquidate] - collateralToTransfer;
     }
 
+    /**
+     * @dev reduce proportionally each collateral in a position
+     * @param position which position to do that for
+     * @param collateralTokens array with the position's assets
+     * @param totalCollateralUSD total USD value of all of the position's assets
+     * @param liquidationValueUSD total USD amount that should be liquidated from the position
+     * @param liquidator actor that performs the liquidation
+     */
     function processCollateralLiquidation(
         uint256 position,
         address[] memory collateralTokens,
