@@ -122,7 +122,7 @@ contract Desultory is IERC721Receiver {
     mapping(address token => uint256 timestamp) private __lastUpdateTimestamp;
 
     ////////////////////////
-    // Modifiers
+    //// Modifiers /////////
     ////////////////////////
 
     modifier moreThanZero(uint256 amount) {
@@ -192,7 +192,7 @@ contract Desultory is IERC721Receiver {
     }
 
     ////////////////////////
-    // External Functions
+    // External Functions ///
     ////////////////////////
 
     // @todo for stablecoin LP providal
@@ -238,7 +238,7 @@ contract Desultory is IERC721Receiver {
         uint256 borrowedAmountUSD = getValueUSD(token, __userBorrows[position].borrowedAmounts[token]);
         uint256 depositedAmount = __userCollaterals[position][token];
         amount = depositedAmount < amount ? depositedAmount : amount;
-
+        // ? - ternaren operator "else"
         uint256 postWithdrawCollateralUSD = getValueUSD(token, depositedAmount - amount);
         uint256 newLTVToUphold = postWithdrawCollateralUSD * __tokenInfos[token].ltvRatio / 100;
         if (borrowedAmountUSD > newLTVToUphold) {

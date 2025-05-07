@@ -21,6 +21,7 @@ contract DesultoryTest is Test {
 
     address weth;
     address usdc;
+    address link;
 
     address public alice = address(1);
     address public bob = address(2);
@@ -106,6 +107,88 @@ contract DesultoryTest is Test {
         assertTrue(position.isOwner(bob, position2));
         assertEq(deposit2, desultory.getPositionCollateralForToken(position2, weth));
         assertEq(deposit2 + depositAmount, desultory.getPositionCollateralForToken(__protocolPositionId, weth));
+    }
+
+    function testMultipleDeposits() public {
+      // User 1
+    uint256 depositAmount = 1e18;
+    uint256 expectedPosition = 2;
+    vm.prank(alice);
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.IndexUpdate(weth, block.timestamp, 1e18);
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(alice, expectedPosition, weth, depositAmount);
+    desultory.deposit(weth, depositAmount);
+    assertTrue(position.isOwner(alice, expectedPosition));
+    assertEq(depositAmount, MockERC20(weth).balanceOf(address(desultory)));
+    assertEq(depositAmount, desultory.getPositionCollateralForToken(expectedPosition, weth));
+
+    address link = address(0x6B904451abABB342D2b787C5126C6361dD815246); // Mainnet LINK address
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.IndexUpdate(link, block.timestamp, 1e18);
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(alice, expectedPosition, link, depositAmount);
+    desultory.deposit(link, depositAmount);
+
+    assertEq(depositAmount * 2, position.getCollateralValue(expectedPosition));
+    assertEq(depositAmount, MockERC20(link).balanceOf(address(desultory)));
+    assertEq(depositAmount, desultory.getPositionCollateralForToken(expectedPosition, link));
+
+    // User 2
+    uint256 deposit2 = 5e15;
+    uint256 position2 = 3;
+    MockERC20(weth).mint(bob, 1000e18);
+    vm.prank(bob);
+    MockERC20(weth).approve(address(desultory), 100e18);
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(bob, position2, weth, deposit2);
+    desultory.deposit(weth, deposit2);
+    assertTrue(position.isOwner(bob, position2));
+    assertEq(deposit2, desultory.getPositionCollateralForToken(position2, weth));
+
+    address usdcAddress = address(usdc);
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(bob, position2, usdcAddress, 5000e6);
+    desultory.deposit(usdcAddress, 5000e6);
+
+    assertEq(5000e6, desultory.getPositionCollateralForToken(position2, usdcAddress));
+    assertEq(5000e6, usdc.balanceOf(address(desultory)));
+
+    // User 3
+
+    //uint256 deposit3 = 2e18;
+    uint256 position3 = 4;
+
+    // Setup WETH
+    MockERC20(weth).mint(lorem, 1000e18);
+    
+    // Setup LINK
+    MockERC20(linkToken).mint(lorem, 8027e18);
+
+    vm.prank(lorem);
+    MockERC20(weth).approve(address(desultory), 100e18);
+    MockERC20(linkToken).approve(address(desultory), 100e18);
+
+    // Deposit WETH
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(lorem, position3, weth, deposit3);
+    desultory.deposit(weth, deposit3);
+
+    assertTrue(position.isOwner(lorem, position3));
+    assertEq(deposit3, desultory.getPositionCollateralForToken(position3, weth));
+
+    // Deposit LINK
+    vm.expectEmit(true, true, true, true);
+    emit Desultory.Deposit(lorem, position3, linkToken, deposit3);
+    desultory.deposit(linkToken, deposit3);
+
+    assertEq(deposit3 * 2, position.getCollateralValue(position3));
+    assertEq(deposit3, MockERC20(linkToken).balanceOf(address(desultory)));
+    assertEq(deposit3, desultory.getPositionCollateralForToken(position3, linkToken));
+
+    // Verify total protocol collateral
+    assertEq(deposit3 + deposit2 + depositAmount,
+        desultory.getPositionCollateralForToken(__protocolPositionId, weth));
     }
 
     ///////////////////////
@@ -302,4 +385,5 @@ contract DesultoryTest is Test {
 
         vm.stopPrank();
     }
+
 }

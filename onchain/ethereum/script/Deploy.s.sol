@@ -26,14 +26,14 @@ contract Deploy is Script
 
         Config config = new Config();
 
-        (address wethF, address usdcF) = config.feeds();
-        (address wethT, address usdcT) = config.tokens();
+        (address wethF, address usdcF, address linkF) = config.feeds();
+        (address wethT, address usdcT, address linkT) = config.tokens();
 
-        priceFeedAddresses = [wethF, usdcF];
-        tokenAddresses = [wethT, usdcT];
-        decimals = [18, 8];
-        ltvRatios = [70, 85];
-        rates = [400, 200];
+        priceFeedAddresses = [wethF, usdcF, linkF];
+        tokenAddresses = [wethT, usdcT, linkT];
+        decimals = [18, 8, 18];
+        ltvRatios = [70, 85, 65];
+        rates = [400, 200, 450];
 
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(deployerKey);
