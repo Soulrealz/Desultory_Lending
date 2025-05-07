@@ -3,7 +3,10 @@ pragma solidity ^0.8.0;
 
 library LibAppStorage {
     bytes32 internal constant STORAGE_SLOT = keccak256("desultory.app.storage");
-
+    
+    uint16 constant MAX_BPS = 10_000;
+    uint256 constant SECONDS_PER_YEAR = 365 days;
+ 
     struct Collateral {
         address priceFeed;
         uint8 decimals;
@@ -56,8 +59,6 @@ library LibAppStorage {
 
         // Interest Variables
         Interest interest;
-        uint16 MAX_BPS;
-        uint256 constant SECONDS_PER_YEAR;
         mapping(address => uint256) globalBorrowIndex;
         mapping(address => uint256) lastUpdateTimestamp;
     }
