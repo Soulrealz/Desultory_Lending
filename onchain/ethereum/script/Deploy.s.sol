@@ -1,7 +1,6 @@
 pragma solidity 0.8.28;
 
 import { Script } from "forge-std/Script.sol";
-import { console } from "forge-std/Test.sol";
 
 import { Config } from "./Config.s.sol";
 
@@ -13,7 +12,8 @@ contract Deploy is Script
 {
     address[] tokenAddresses;
     address[] priceFeedAddresses;
-    uint8[] decimals;
+    uint8[] feedDecimals;
+    uint8[] tokenDecimals;
     uint8[] ltvRatios;
     uint16[] rates;
 
@@ -22,8 +22,7 @@ contract Deploy is Script
     DUSD dusd;
 
     function run() external returns (address, address, address)
-    {   
-
+    {
         Config config = new Config();
 
         (address wethF, address usdcF) = config.feeds();
@@ -31,7 +30,8 @@ contract Deploy is Script
 
         priceFeedAddresses = [wethF, usdcF];
         tokenAddresses = [wethT, usdcT];
-        decimals = [18, 8];
+        feedDecimals = [18, 8];
+        tokenDecimals = [18, 18];
         ltvRatios = [70, 85];
         rates = [400, 200];
 
@@ -39,10 +39,12 @@ contract Deploy is Script
         vm.startBroadcast(deployerKey);
 
         position = new Position("Desultor", "DST");
-        //dusd = new DUSD("DesultoryUSD", "DUSD", config.lz(), 0xEe8e7980c8E59B70051bE94687799D20Ff21eAe4);
         dusd = new DUSD("DesultoryUSD", "DUSD");
-        desultory = new Desultory(tokenAddresses, priceFeedAddresses, decimals, ltvRatios, rates, address(position), address(dusd));
+        desultory = new Desultory(
+            tokenAddresses, priceFeedAddresses, feedDecimals, tokenDecimals, ltvRatios, rates, address(position), address(dusd)
+        );
 
+        position.setProtocol(address(desultory));
         position.transferOwnership(address(desultory));
 
         vm.stopBroadcast();

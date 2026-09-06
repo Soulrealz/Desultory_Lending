@@ -2,4 +2,8 @@
 lib/
 out/
 cache/
+broadcast/
 .env
+
+# Superpowers skill scratch output (specs/plans)
+docs/superpowers/
