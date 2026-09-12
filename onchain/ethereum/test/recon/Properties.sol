@@ -24,6 +24,9 @@ abstract contract Properties is BeforeAfter, Asserts {
     uint256[2] internal ghostPaidIn;
     uint256[2] internal ghostPaidOut;
 
+    uint256 internal ghostDusdMinted;
+    uint256 internal ghostDusdBurned;
+
     /// @dev per-position scaled balances must sum to the pool totals, exactly.
     /// These are raw stored integers and no rounding happens in the summation,
     /// so any drift at all is a real bookkeeping bug.
@@ -94,5 +97,20 @@ abstract contract Properties is BeforeAfter, Asserts {
             uint256 balance = MockERC20(tokens[i]).balanceOf(address(desultory));
             eq(ghostPaidIn[i], ghostPaidOut[i] + balance, "token conservation broken");
         }
+    }
+
+    /// @dev DUSD in circulation equals what this chain authorized, and recorded debt
+    /// never exceeds it. The cross-chain analogue of property_tokenConservation.
+    function property_dusdSupplyMatchesAuthorization() public {
+        eq(ghostDusdMinted, ghostDusdBurned + dusd.totalSupply(), "DUSD supply does not match authorizations");
+    }
+
+    /// @dev per-position scaled DUSD debt must sum to the recorded total
+    function property_dusdDebtReconciles() public {
+        uint256 sum;
+        for (uint256 p = 0; p < positionIds.length; p++) {
+            sum += desultory.getScaledDusdDebt(positionIds[p]);
+        }
+        eq(sum, desultory.totalScaledDusdDebt(), "scaled DUSD debt must sum to the total");
     }
 }

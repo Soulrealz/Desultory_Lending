@@ -489,4 +489,165 @@ contract DesultoryTest is Test {
             "scaled borrow must reconstruct the unscaled debt"
         );
     }
+
+    ///////////////////////
+    // Ownership Tests
+    ///////////////////////
+
+    function testOwnerIsSetAndSettersAreGated() public {
+        address owner = desultory.owner();
+        assertTrue(owner != address(0), "owner must be set");
+
+        vm.prank(owner);
+        desultory.setAdapter(address(0xABCD));
+        assertEq(desultory.adapter(), address(0xABCD));
+
+        vm.prank(owner);
+        desultory.setAllowedDestination(42, true);
+        assertTrue(desultory.allowedDestination(42));
+
+        vm.prank(owner);
+        desultory.setDusdStabilityFee(250);
+        assertEq(desultory.dusdStabilityFeeBps(), 250);
+    }
+
+    function testNonOwnerCannotConfigure() public {
+        vm.startPrank(alice);
+        vm.expectRevert();
+        desultory.setAdapter(address(0xABCD));
+        vm.expectRevert();
+        desultory.setAllowedDestination(42, true);
+        vm.expectRevert();
+        desultory.setDusdStabilityFee(250);
+        vm.stopPrank();
+    }
+
+    function testStabilityFeeIsCapped() public {
+        vm.prank(desultory.owner());
+        vm.expectRevert(Desultory.Desultory__FeeTooHigh.selector);
+        desultory.setDusdStabilityFee(10_001);
+    }
+
+    ///////////////////////
+    // DUSD Debt Tests
+    ///////////////////////
+
+    function testBorrowDusdMintsAndRecordsDebt() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        assertEq(dusd.balanceOf(alice), 1_000e18, "DUSD should be minted to borrower");
+        assertEq(desultory.getPositionDusdDebt(1), 1_000e18, "debt should be recorded");
+    }
+
+    function testDusdDebtCountsTowardHealth() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18); // 1 WETH @ 3000, LTV 70 => 2100 USD capacity
+
+        uint256 before = desultory.userBorrowedAmountUSD(1);
+        assertEq(before, 0);
+
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        assertEq(desultory.userBorrowedAmountUSD(1), 1_000e18, "DUSD debt must count as USD debt");
+        assertTrue(desultory.isPositionHealthy(1));
+    }
+
+    function testBorrowDusdBeyondCapacityReverts() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18); // 2100 USD capacity
+
+        vm.prank(alice);
+        vm.expectRevert(Desultory.Desultory__CollateralValueNotEnough.selector);
+        desultory.borrowDUSD(1, 3_000e18);
+    }
+
+    function testOnlyPositionOwnerCanBorrowDusd() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__NotPositionOwner.selector, uint256(1)));
+        desultory.borrowDUSD(1, 1e18);
+    }
+
+    function testDusdStabilityFeeAccruesEntirelyToReserves() public {
+        vm.prank(desultory.owner());
+        desultory.setDusdStabilityFee(1_000); // 10% annual
+
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        uint256 reservesBefore = desultory.dusdReserves();
+
+        vm.warp(block.timestamp + 365 days);
+        desultory.accrueDusd();
+
+        uint256 debtAfter = desultory.getPositionDusdDebt(1);
+        uint256 feeCharged = debtAfter - 1_000e18;
+
+        assertApproxEqRel(debtAfter, 1_100e18, 1e15, "10% annual fee on 1000 DUSD");
+        assertEq(
+            desultory.dusdReserves() - reservesBefore,
+            feeCharged,
+            "entire fee must go to reserves; there are no DUSD depositors"
+        );
+    }
+
+    function testAccrualNeverDistributesMoreThanCharged() public {
+        vm.prank(desultory.owner());
+        desultory.setDusdStabilityFee(500);
+
+        vm.prank(alice);
+        desultory.deposit(0, weth, 100e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 50_000e18);
+
+        for (uint256 i = 0; i < 6; i++) {
+            uint256 debtBefore = desultory.getPositionDusdDebt(1);
+            uint256 resBefore = desultory.dusdReserves();
+
+            vm.warp(block.timestamp + 97 days + 1337);
+            desultory.accrueDusd();
+
+            uint256 charged = desultory.getPositionDusdDebt(1) - debtBefore;
+            uint256 distributed = desultory.dusdReserves() - resBefore;
+            assertLe(distributed, charged, "must never distribute more than charged");
+        }
+    }
+
+    function testRepayDusdBurnsAndClearsDebt() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        vm.prank(alice);
+        desultory.repayDUSD(1, 1_000e18);
+
+        assertEq(dusd.balanceOf(alice), 0, "DUSD should be burned on repay");
+        assertEq(desultory.getPositionDusdDebt(1), 0, "debt should be cleared");
+    }
+
+    function testRepayDusdIsPermissionless() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        // bob acquires DUSD and settles alice's debt
+        vm.prank(alice);
+        dusd.transfer(bob, 1_000e18);
+
+        vm.prank(bob);
+        desultory.repayDUSD(1, 1_000e18);
+
+        assertEq(desultory.getPositionDusdDebt(1), 0);
+    }
 }

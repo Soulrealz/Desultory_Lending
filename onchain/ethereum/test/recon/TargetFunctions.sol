@@ -145,6 +145,40 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         return ((maxUSD - owedUSD) * WAD) / unitPriceUSD;
     }
 
+    function desultory_borrowDUSD(uint8, uint8 positionSeed, uint256 amount) public updateGhosts {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+
+        uint256 maxUSD = desultory.userMaxBorrowValueUSD(positionId);
+        uint256 owedUSD = desultory.userBorrowedAmountUSD(positionId);
+        precondition(maxUSD > owedUSD);
+
+        // DUSD is valued at $1, so USD headroom is the DUSD amount directly
+        amount = between(amount, 1, maxUSD - owedUSD);
+
+        vm.prank(position.ownerOf(positionId));
+        desultory.borrowDUSD(positionId, amount);
+        ghostDusdMinted += amount;
+    }
+
+    function desultory_repayDUSD(uint8, uint8 positionSeed, uint256 amount) public updateGhosts {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+
+        uint256 debt = desultory.getPositionDusdDebt(positionId);
+        precondition(debt > 0);
+
+        address payer = position.ownerOf(positionId);
+        uint256 balance = dusd.balanceOf(payer);
+        precondition(balance > 0);
+
+        amount = between(amount, 1, debt < balance ? debt : balance);
+
+        vm.prank(payer);
+        desultory.repayDUSD(positionId, amount);
+        ghostDusdBurned += amount;
+    }
+
     function warp(uint32 secs) public updateGhosts {
         uint256 jump = between(uint256(secs), 1, MAX_WARP);
         vm.warp(block.timestamp + jump);

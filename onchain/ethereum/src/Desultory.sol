@@ -3,13 +3,29 @@ pragma solidity 0.8.28;
 // Libs
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Other contracts
 import "./PositionNFT.sol";
 import "./DUSD.sol";
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
 
-contract Desultory {
+/**
+ * @dev the slice of the cross-chain Adapter the accounting core needs.
+ *
+ * The real sendMint returns a MessagingReceipt struct; declaring no return value
+ * here is deliberate. Solidity skips return decoding entirely when none is declared,
+ * so the call succeeds and the receipt is discarded, and this contract never has to
+ * import LayerZero types. Do NOT "fix" this by declaring returns (bytes memory) —
+ * the ABI decoder would then read a struct as dynamic bytes and revert.
+ */
+interface IAdapter {
+    function sendMint(uint32 dstEid, address recipient, uint256 amount, bytes calldata options, address refund)
+        external
+        payable;
+}
+
+contract Desultory is Ownable {
     ////////////////////////
     // Errors
     ////////////////////////
@@ -23,6 +39,10 @@ contract Desultory {
     error Desultory__NotPositionOwner(uint256 positionId);
     error Desultory__PositionDoesNotExist(uint256 positionId);
     error Desultory__InsufficientLiquidity(address token);
+    error Desultory__FeeTooHigh();
+    error Desultory__NoDusdDebt(uint256 positionId);
+    error Desultory__AdapterNotSet();
+    error Desultory__DestinationNotAllowed(uint32 eid);
 
     //@dev
     error NotImplemented();
@@ -42,6 +62,12 @@ contract Desultory {
     event AssetLiquidation(
         address indexed liquidator, uint256 indexed debtor, address indexed liquidatedAsset, uint256 amountLiquidated
     );
+    event AdapterSet(address indexed adapter);
+    event DestinationSet(uint32 indexed eid, bool allowed);
+    event DusdStabilityFeeSet(uint16 bps);
+    event DusdBorrow(uint256 indexed position, address indexed recipient, uint256 amount, uint32 dstEid);
+    event DusdRepay(uint256 indexed position, address indexed payer, uint256 amount);
+    event DusdIndexUpdate(uint256 timestamp, uint256 dusdBorrowIndex, uint256 dusdReserves);
 
     ///////////////////////
     // Types & interfaces
@@ -110,6 +136,19 @@ contract Desultory {
     Position private __positionContract;
     DUSD private __DUSD;
 
+    // DUSD debt. Stored separately from __pools: DUSD is minted, not deposited, so it
+    // has no liquidity side, no utilization, and no lender share.
+    uint256 public dusdBorrowIndex;
+    uint40 private __dusdLastUpdate;
+    uint256 public totalScaledDusdDebt;
+    uint256 public dusdReserves;
+    mapping(uint256 position => uint256 scaled) private __scaledDusdDebt;
+
+    // Cross-chain Configuration
+    address public adapter;
+    mapping(uint32 eid => bool allowed) public allowedDestination;
+    uint16 public dusdStabilityFeeBps;
+
     // Interest Variables
     Interest private __interest;
     uint16 private constant MAX_BPS = 10_000; // 100%
@@ -158,7 +197,7 @@ contract Desultory {
         uint16[] memory rates,
         address _positionContract,
         address _DUSDContract
-    ) {
+    ) Ownable(msg.sender) {
         if (
             ltvs.length != priceFeeds.length || ltvs.length != tokenAddresses.length
                 || ltvs.length != feedDecimals.length || ltvs.length != tokenDecimals.length || ltvs.length != rates.length
@@ -181,6 +220,9 @@ contract Desultory {
         }
 
         __supportedTokensCount = tokenAddresses.length;
+        dusdBorrowIndex = WAD;
+        __dusdLastUpdate = uint40(block.timestamp);
+        dusdStabilityFeeBps = 200; // 2% annual default
         __positionContract = Position(_positionContract);
         __DUSD = DUSD(_DUSDContract);
         __interest = Interest({
@@ -194,6 +236,36 @@ contract Desultory {
             highBorrowRate: 3500, // 35%
             extremeBorrowRate: 6500 // 65%
         });
+    }
+
+    ////////////////////////
+    // Admin Functions
+    ////////////////////////
+
+    /// @dev the cross-chain Adapter permitted to be paid for mint authorizations
+    function setAdapter(address _adapter) external onlyOwner {
+        adapter = _adapter;
+        emit AdapterSet(_adapter);
+    }
+
+    /// @dev destination chains a position may mint DUSD to
+    function setAllowedDestination(uint32 eid, bool allowed) external onlyOwner {
+        allowedDestination[eid] = allowed;
+        emit DestinationSet(eid, allowed);
+    }
+
+    /**
+     * @dev annual DUSD stability fee in BPS. Flat, not a utilization curve: nobody
+     * deposits DUSD, so utilization would be permanently zero and the kinked model
+     * would return the base rate no matter how much is outstanding.
+     */
+    function setDusdStabilityFee(uint16 bps) external onlyOwner {
+        if (bps > MAX_BPS) revert Desultory__FeeTooHigh();
+        // settle at the old rate first: repricing outstanding debt retroactively
+        // would charge interest that was never agreed to
+        accrueDusd();
+        dusdStabilityFeeBps = bps;
+        emit DusdStabilityFeeSet(bps);
     }
 
     ////////////////////////
@@ -349,6 +421,120 @@ contract Desultory {
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         emit Repayment(positionId, token, amount);
+    }
+
+    ////////////////////////
+    // DUSD Debt
+    ////////////////////////
+
+    function getPositionDusdDebt(uint256 positionId) public view returns (uint256) {
+        return __fromScaledUp(__scaledDusdDebt[positionId], dusdBorrowIndex);
+    }
+
+    function getScaledDusdDebt(uint256 positionId) external view returns (uint256) {
+        return __scaledDusdDebt[positionId];
+    }
+
+    /**
+     * @dev accrue the DUSD stability fee. Charges borrowers FIRST and sends exactly
+     * what was charged to reserves — deriving a notional interest figure separately
+     * from the index update is what let the token-pool accrual distribute more than
+     * it took in. See docs/Protocol/Accounting.md.
+     *
+     * There is no lender split: nobody deposits DUSD, so the whole fee is protocol
+     * revenue.
+     */
+    function accrueDusd() public {
+        uint256 dt = block.timestamp - __dusdLastUpdate;
+        if (dt == 0) {
+            return;
+        }
+        __dusdLastUpdate = uint40(block.timestamp);
+
+        uint256 totalDebt = __fromScaledUp(totalScaledDusdDebt, dusdBorrowIndex);
+        if (totalDebt == 0) {
+            emit DusdIndexUpdate(block.timestamp, dusdBorrowIndex, dusdReserves);
+            return;
+        }
+
+        uint256 factor = (uint256(dusdStabilityFeeBps) * dt * WAD) / (SECONDS_PER_YEAR * MAX_BPS);
+        dusdBorrowIndex += (dusdBorrowIndex * factor) / WAD;
+
+        uint256 charged = __fromScaledUp(totalScaledDusdDebt, dusdBorrowIndex) - totalDebt;
+        dusdReserves += charged;
+
+        emit DusdIndexUpdate(block.timestamp, dusdBorrowIndex, dusdReserves);
+    }
+
+    /// @dev borrow DUSD onto this chain. Owner-gated, like every other borrow.
+    function borrowDUSD(uint256 positionId, uint256 amount) external moreThanZero(amount) {
+        _borrowDusd(positionId, amount);
+        __DUSD.mint(msg.sender, amount);
+        emit DusdBorrow(positionId, msg.sender, amount, 0);
+    }
+
+    /**
+     * @dev borrow DUSD onto another chain.
+     *
+     * Accounting is identical to borrowDUSD — debt is debt regardless of where the
+     * tokens land. The only difference is that instead of minting locally we send one
+     * message authorizing the mint on the destination.
+     *
+     * msg.value funds the LayerZero fee; excess is refunded to msg.sender.
+     */
+    function borrowDUSDTo(
+        uint256 positionId,
+        uint32 dstEid,
+        address recipient,
+        uint256 amount,
+        bytes calldata options
+    ) external payable moreThanZero(amount) {
+        if (adapter == address(0)) revert Desultory__AdapterNotSet();
+        if (!allowedDestination[dstEid]) revert Desultory__DestinationNotAllowed(dstEid);
+
+        _borrowDusd(positionId, amount);
+
+        IAdapter(adapter).sendMint{value: msg.value}(dstEid, recipient, amount, options, msg.sender);
+        emit DusdBorrow(positionId, recipient, amount, dstEid);
+    }
+
+    /// @dev shared by borrowDUSD and the cross-chain path; records debt and checks health
+    function _borrowDusd(uint256 positionId, uint256 amount) internal {
+        if (!__positionContract.isOwner(msg.sender, positionId)) {
+            revert Desultory__NotPositionOwner(positionId);
+        }
+        accrueDusd();
+
+        uint256 scaled = __toScaledUp(amount, dusdBorrowIndex);
+        __scaledDusdDebt[positionId] += scaled;
+        totalScaledDusdDebt += scaled;
+
+        if (userBorrowedAmountUSD(positionId) > userMaxBorrowValueUSD(positionId)) {
+            revert Desultory__CollateralValueNotEnough();
+        }
+    }
+
+    /// @dev permissionless, like repay: settling someone's debt only helps them
+    function repayDUSD(uint256 positionId, uint256 amount) external moreThanZero(amount) {
+        accrueDusd();
+
+        uint256 debt = getPositionDusdDebt(positionId);
+        if (debt == 0) {
+            revert Desultory__NoDusdDebt(positionId);
+        }
+        if (amount > debt) {
+            amount = debt;
+        }
+
+        uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
+        if (scaled > __scaledDusdDebt[positionId]) {
+            scaled = __scaledDusdDebt[positionId];
+        }
+        __scaledDusdDebt[positionId] -= scaled;
+        totalScaledDusdDebt -= scaled;
+
+        __DUSD.burn(msg.sender, amount);
+        emit DusdRepay(positionId, msg.sender, amount);
     }
 
     /**
@@ -514,6 +700,13 @@ contract Desultory {
                 totalUSD += getValueUSD(token, amount);
             }
         }
+
+        // DUSD is valued at $1. This is an assumption, not a fact: it holds only while
+        // the peg does, and the peg mechanism is not designed yet (project C2). If DUSD
+        // trades above $1, debt here is understated and positions are under-collateralized
+        // in real terms.
+        totalUSD += getPositionDusdDebt(position);
+
         return totalUSD;
     }
 

@@ -18,3 +18,4 @@ which is what [[Protocol]] is for.
 
 - [[0001-nft-as-position]] — the Position NFT is the source of truth for position ownership
 - [[0002-internal-consistency-invariants]] — fuzz for internal consistency, not economic solvency
+- [[0003-dusd-only-cross-chain-borrowing]] — only DUSD crosses chains; every position has one home chain

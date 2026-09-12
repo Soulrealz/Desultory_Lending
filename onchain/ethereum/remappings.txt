@@ -6,3 +6,7 @@
 forge-std/=lib/forge-std/src/
 @chainlink/contracts/=lib/foundry-chainlink-toolkit/src/
 @chimera/=lib/chimera/src/
+@layerzerolabs/test-devtools-evm-foundry/=lib/devtools/packages/test-devtools-evm-foundry/
+@layerzerolabs/lz-evm-messagelib-v2/=lib/layerzero-v2/packages/layerzero-v2/evm/messagelib/
+solidity-bytes-utils/=lib/solidity-bytes-utils/
+@layerzerolabs/lz-evm-v1-0.7/=lib/LayerZero/
