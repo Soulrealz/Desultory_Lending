@@ -7,3 +7,9 @@ broadcast/
 
 # Superpowers skill scratch output (specs/plans)
 docs/superpowers/
+
+# Obsidian per-machine UI state
+docs/.obsidian/workspace.json
+docs/.obsidian/workspace-mobile.json
+docs/.obsidian/cache
+docs/.obsidian/graph-view-state.json

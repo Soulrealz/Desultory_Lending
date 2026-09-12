@@ -1,7 +1,7 @@
 # Project Structure
 
 > Maintained per the rule in `CLAUDE.md`: update when files/directories are added, removed, renamed, or moved.
-> Gitignored content (`lib/`, `out/`, `cache/`, `.env`, `broadcast/`) is excluded.
+> Gitignored content (`lib/`, `out/`, `cache/`, `.env`, `broadcast/`, `docs/superpowers/`) is excluded.
 
 ```
 Desultory_Lending/
@@ -12,13 +12,26 @@ Desultory_Lending/
 ├── PROJECT_CONTEXT.md          # High-level map of core logic per module
 ├── PROJECT_STRUCTURE.md        # This file
 ├── README.md                   # Protocol specification: rates model, liquidation engine, governance
-├── docs/
-│   ├── PROJECT_ASSESSMENT.md   # 2026-06-10 state-of-the-project audit (what works, what's broken/missing)
-│   └── superpowers/
-│       ├── specs/lending-core/June_2026/
-│       │   └── 2026-06-10-nft-positions-lender-accounting-design.md  # Approved design spec
-│       └── plans/lending-core/June_2026/
-│           └── 2026-06-10-nft-positions-lender-accounting.md         # Executed implementation plan
+├── docs/                       # Obsidian vault (open this folder as the vault root)
+│   ├── README.md               # Vault orientation: the four zones and their accuracy contracts
+│   ├── .obsidian/              # Vault config (app/core-plugins/graph); workspace state gitignored
+│   ├── Protocol/               # MAINTAINED: what the protocol actually does, per module
+│   │   ├── Protocol.md         # Zone index
+│   │   ├── Accounting.md       # Dual-index model, scaled balances, reserves, rounding policy
+│   │   ├── Interest-Rate-Model.md  # 4-bracket kinked borrow curve, per-token multiplier
+│   │   ├── Positions.md        # NFT-as-position semantics, authorization, transfer health gate
+│   │   ├── Oracles.md          # Chainlink wrapper, staleness window, decimal normalization
+│   │   └── Liquidations.md     # Documents the engine's defects; the module is broken
+│   ├── Decisions/              # MAINTAINED: numbered ADRs, superseded rather than edited
+│   │   ├── Decisions.md        # Zone index and status conventions
+│   │   └── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
+│   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
+│   │   ├── Audit.md            # Zone index
+│   │   └── 2026-06-10-project-assessment.md  # State-of-the-project audit
+│   └── Notes/                  # NOT maintained: research and scratch thinking
+│       ├── Notes.md            # Zone index
+│       ├── Research/           # Reading notes on external systems (LayerZero, ElizaOS, Aave)
+│       └── Log/                # Dated working notes
 └── onchain/
     └── ethereum/               # Foundry project (solc 0.8.28)
         ├── README.md           # Dependency install + test instructions

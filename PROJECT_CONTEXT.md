@@ -9,7 +9,7 @@ A learning project: an over-collateralized, cross-chain borrow/lending protocol.
 Target design: deposit collateral on one chain (e.g. Ethereum mainnet), borrow against
 it on another (e.g. Base/Optimism) via LayerZero. Positions are represented as NFTs so
 they can eventually be traded between users. Full spec in `README.md`; current
-gaps/bugs catalogued in `docs/PROJECT_ASSESSMENT.md`.
+gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 
 ## Modules
 

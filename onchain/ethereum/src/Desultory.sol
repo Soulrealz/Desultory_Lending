@@ -96,7 +96,7 @@ contract Desultory {
     mapping(uint256 position => mapping(address token => uint256 scaled)) private __scaledDeposits;
     mapping(uint256 position => mapping(address token => uint256 scaled)) private __scaledBorrows;
 
-    // Liquidation Variables (redesign pending — see PROJECT_ASSESSMENT.md point 4)
+    // Liquidation Variables (redesign pending — see docs/Audit/2026-06-10-project-assessment.md point 4)
     uint256 private __liquidationPenalty = 10;
     uint256 private __liquidationPenaltyProtocol = 3;
     mapping(address token => uint256 amount) private __profit;
@@ -352,7 +352,7 @@ contract Desultory {
     }
 
     /**
-     * @dev LIQUIDATIONS ARE PENDING REDESIGN (PROJECT_ASSESSMENT.md point 4).
+     * @dev LIQUIDATIONS ARE PENDING REDESIGN (docs/Audit/2026-06-10-project-assessment.md point 4).
      * These two functions are only mechanically re-pointed at the new scaled
      * storage so the contract compiles; their economics are known-broken
      * (wrong-token payout, zero-rounding proportions, over-seizure) and they
