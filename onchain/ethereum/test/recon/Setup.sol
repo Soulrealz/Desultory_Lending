@@ -8,6 +8,8 @@ import {Desultory} from "../../src/Desultory.sol";
 import {Position} from "../../src/PositionNFT.sol";
 import {DUSD} from "../../src/DUSD.sol";
 
+import {EndpointV2Mock} from "@layerzerolabs/test-devtools-evm-foundry/contracts/mocks/EndpointV2Mock.sol";
+
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 
@@ -21,6 +23,7 @@ abstract contract Setup is BaseSetup {
     Desultory internal desultory;
     Position internal position;
     DUSD internal dusd;
+    EndpointV2Mock internal lzEndpoint;
 
     MockERC20 internal weth;
     MockERC20 internal usdc;
@@ -72,10 +75,18 @@ abstract contract Setup is BaseSetup {
         rates[1] = 200;
 
         position = new Position("Desultor", "DST");
-        dusd = new DUSD("DesultoryUSD", "DUSD");
+
+        // DUSD is an OFT, so it needs a live endpoint at construction. The harness
+        // is single-chain: nothing is ever sent through it, it only has to exist.
+        lzEndpoint = new EndpointV2Mock(1, address(this));
+        dusd = new DUSD("DesultoryUSD", "DUSD", address(lzEndpoint), address(this));
+
         desultory = new Desultory(
             tokenAddresses, priceFeeds, feedDecimals, tokenDecimals, ltvs, rates, address(position), address(dusd)
         );
+
+        // without this every DUSD borrow reverts and the DUSD targets do nothing
+        dusd.setMinter(address(desultory), true);
 
         // Order matters: setProtocol must run while the deployer still owns the
         // NFT contract. Reversed, the health gate is permanently disabled.

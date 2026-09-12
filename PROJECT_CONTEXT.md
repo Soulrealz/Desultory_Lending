@@ -39,7 +39,23 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - Liquidations (`liquidateAssetPosition`, `liquidateProportionalPosition`):
   **still known-broken**, only mechanically re-pointed at the new storage;
   redesign is assessment point 4. Untested on purpose.
-- No admin/treasury withdrawal yet; `pool.reserves` just accumulates.
+- **DUSD debt** is tracked entirely separately from `__pools` and is never an entry in
+  `__tokenList`: `dusdBorrowIndex`, `totalScaledDusdDebt`, `dusdReserves`, and a
+  per-position `__scaledDusdDebt`. `borrowDUSD` mints locally, `borrowDUSDTo` sends a
+  LayerZero mint authorization instead (both go through `_borrowDusd`, which checks
+  ownership, accrues, records the debt and then checks health). `repayDUSD` is
+  permissionless and burns the payer's DUSD. `accrueDusd()` applies a flat annual
+  `dusdStabilityFeeBps` (default 2%) with the **entire** fee to `dusdReserves` — there
+  are no DUSD depositors — and follows the same charge-first discipline as `accrue`.
+  Not the kinked curve: nobody deposits DUSD, so utilization would be permanently zero.
+- `userBorrowedAmountUSD` adds DUSD debt **at par ($1)** after its per-token loop, so
+  every LTV check, `isPositionHealthy` and the NFT transfer gate see it. The par
+  assumption is a known hole until the peg is designed — see `docs/Protocol/Cross-Chain.md`.
+- `Ownable` (added with the cross-chain work; previously there was no access control at
+  all). Owner-only: `setAdapter`, `setAllowedDestination(eid, bool)`,
+  `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS).
+- No admin/treasury withdrawal yet; `pool.reserves` and `dusdReserves` just accumulate.
+  Token add/remove is still ungoverned.
 
 ### `src/PositionNFT.sol` — `Position` ERC721
 - Token id = position id; minted by Desultory (`deposit(0, …)`). The NFT IS
@@ -49,14 +65,27 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   Desultory address once, before ownership transfer (see `Deploy.s.sol`).
 
 ### `src/DUSD.sol` — protocol stablecoin
-- Currently a plain ERC20 stub; intended to become a LayerZero OFT minted/borrowed by
-  the protocol (commented-out OFT constructor).
+- LayerZero V2 **OFT**, constructor `(name, symbol, lzEndpoint, delegate)`. Being an OFT
+  is load-bearing: it is what lets a borrower bridge their own DUSD back to the home
+  chain and repay there, with no protocol message involved.
+- `mint`/`burn` are gated by `isMinter`, an owner-managed allowlist. In a normal
+  deployment the minters are `Desultory` (local borrows) and `Adapter` (mints
+  authorized from another chain).
 
 ### `src/governance/VoteToken.sol` — governance token
 - Bare LayerZero OFT. Staking/boosting/slashing from the spec not implemented.
 
 ### `src/crosschain/Adapter.sol` — cross-chain adapter
-- Empty placeholder (pragma only). All cross-chain functionality is future work.
+- LayerZero V2 `OApp` carrying DUSD mint authorizations. Symmetric — the same contract
+  is deployed on every chain and both sends and receives. `quoteMint` prices a message;
+  `sendMint` is restricted to the configured `desultory`; `_lzReceive` decodes
+  `(recipient, amount)` and mints.
+- **`_lzReceive` must never be able to revert** — no pause flag, allowlist, supply cap or
+  `require`. The debt is already recorded on the source chain when it runs, and a
+  permanent revert would strand the message with a borrower owing DUSD they never
+  received. Every check lives on the send side.
+- Peer configuration is the entire trust boundary: a compromised Adapter on any chain can
+  mint unlimited DUSD, spendable everywhere. See `docs/Decisions/0003-dusd-only-cross-chain-borrowing.md`.
 
 ### `src/libraries/OracleLib.sol`
 - Wraps Chainlink `latestRoundData` with a 3-hour staleness revert. All USD valuation
@@ -64,25 +93,42 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 
 ### `script/` — deployment
 - `Config.s.sol`: per-network addresses; deploys `MockV3Aggregator` + `MockERC20`
-  (WETH 18 dec, USDC 8 dec) on Anvil chain id 31337.
+  (WETH 18 dec, USDC 8 dec) and a real `EndpointV2Mock` on Anvil, exposing `lz` and
+  `eid`. The endpoint's owner must be the address actually performing the CREATE (the
+  broadcaster, read back via `vm.readCallers`), because its constructor registers its
+  blocked message library through an `onlyOwner` path.
 - `Deploy.s.sol`: deploys Position, DUSD, Desultory with WETH (feed 18 dec, LTV 70,
   rate 400) and USDC (feed 8 dec, LTV 85, rate 200); both mock tokens are 18-dec
   ERC20s (`tokenDecimals = [18, 18]`). Calls `position.setProtocol(desultory)` then
-  transfers Position ownership to Desultory. Reads `PRIVATE_KEY` env var.
+  transfers Position ownership to Desultory, then deploys the `Adapter` and wires it:
+  `adapter.setDesultory`, `dusd.setMinter(desultory|adapter)`, `desultory.setAdapter`.
+  Peers and allowed destinations are deliberately **not** set — a single-chain local
+  deploy has no peer. Reads `PRIVATE_KEY` env var; every `Ownable` is owned by
+  `vm.addr(deployerKey)`.
 
 ### `test/`
-- `Desultory.t.sol` — 22 tests: deposit/withdraw/borrow/repay on the positionId
+- `Desultory.t.sol` — 33 tests: deposit/withdraw/borrow/repay on the positionId
   API, interest accrual & lender yield (incl. 10% reserve check), NFT-transfer
   control handoff, unhealthy-transfer gating, scaled-getter reconstruction, and
-  stateless fuzz invariants for the rounding/solvency policy. Liquidation paths
+  stateless fuzz invariants for the rounding/solvency policy, plus the ownership
+  surface and DUSD debt accounting. Liquidation paths
   remain untested on purpose.
 - `Position.t.sol` — 7 unit tests for mint auth, `setProtocol` wiring, and the
   health-gated `_update` hook (via a stub protocol).
+- `DUSD.t.sol` — minter gating on `mint`/`burn`, owner gating on `setMinter`, and that
+  the OFT base is wired.
+- `crosschain/` — two-chain tests built on LayerZero's `TestHelperOz5`.
+  `Adapter.t.sol` covers messaging in isolation, including that the receive path mints
+  for a recipient with no position and no history. `CrossChainBorrow.t.sol` is the full
+  flow: deposit on A → DUSD minted on B, over-LTV and disallowed-destination borrows
+  reverting *before* any message is sent, and bridging DUSD home with the OFT's own
+  `send()` to repay locally.
 - `recon/` — **Chimera stateful fuzzing harness**, driven by both Medusa and Echidna
   from one scaffold (`Setup` → `BeforeAfter` → `Properties` → `TargetFunctions` →
   `CryticTester`/`CryticToFoundry`). Three actors, clamped targets over
   deposit/withdraw/borrow/repay plus time warps and wide oracle price movement.
-  Asserts six internal-consistency invariants; economic solvency is deliberately not
+  Also drives `borrowDUSD`/`repayDUSD`. Asserts eight internal-consistency invariants
+  (the last two covering DUSD supply-vs-authorization and scaled DUSD debt reconciliation); economic solvency is deliberately not
   asserted, and liquidation entry points are absent from the target surface. Prose
   statement of the invariants is in `docs/Audit/Invariants.md`; the reasoning is ADR
   0002. `AccrualLeak.t.sol` is the regression test for the accrual bug this harness

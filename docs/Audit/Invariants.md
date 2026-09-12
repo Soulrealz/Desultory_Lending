@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 620ff7d
+verified-against: 7d9de79
 ---
 
 # Invariants
@@ -11,12 +11,12 @@ in a sentence is an invariant nobody can review.
 Implementation lives in `onchain/ethereum/test/recon/Properties.sol`. The reasoning
 behind this particular set is [[0002-internal-consistency-invariants]].
 
-All six are **internal-consistency** properties: they constrain the bookkeeping, not
+All eight are **internal-consistency** properties: they constrain the bookkeeping, not
 the economics. Each holds even when the protocol is underwater, which is what allows
 the fuzzer to move oracle prices between 0.01× and 100× of their starting value
 without generating false alarms.
 
-## The six
+## The eight
 
 **1. Scaled balances reconcile.**
 For each token, the per-position scaled deposits sum to `pool.totalScaledDeposits`,
@@ -83,6 +83,18 @@ Two details worth remembering:
   simple sequences are structurally incapable of surfacing it, which is why two
   hand-written probes over 3 and 27 simulated years both passed.
 
+**7. DUSD supply matches authorization.**
+`ghostDusdMinted == ghostDusdBurned + dusd.totalSupply()`, exactly. The cross-chain
+analogue of invariant 6: the ghost counters record what the harness asked the protocol
+to mint and burn, and the token's own supply must agree. The harness is single-chain, so
+this constrains the debt accounting rather than the messaging — but it is the same
+question a multi-chain deployment has to answer, which is why it is stated this way.
+
+**8. Scaled DUSD debt reconciles.**
+Per-position `getScaledDusdDebt` sums to `totalScaledDusdDebt`. Exact equality, for the
+same reason as invariant 1: raw stored integers, no rounding in the summation. DUSD debt
+lives in its own storage outside `__pools`, so invariant 1 does not cover it.
+
 ## Running them
 
 ```
@@ -95,5 +107,6 @@ Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 ## Related
 
 - [[Accounting]] — the accrual math these constrain
+- [[Cross-Chain]] — the DUSD debt accounting invariants 7 and 8 constrain
 - [[0002-internal-consistency-invariants]] — why this set and not another
 - [[Liquidations]] — the excluded surface

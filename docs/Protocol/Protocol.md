@@ -18,5 +18,6 @@ verified-against: <commit sha>
 - [[Positions]] — the NFT *is* the position; ownership and transfer gating
 - [[Oracles]] — Chainlink wrapper, staleness, decimal normalization
 - [[Liquidations]] — **currently broken**; documents the defects, not a working design
+- [[Cross-Chain]] — DUSD-only remote borrowing over LayerZero V2, and DUSD debt accounting
 
-Not yet written, pending their design sessions: cross-chain messaging, governance.
+Not yet written, pending its design session: governance.

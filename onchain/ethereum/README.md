@@ -17,10 +17,16 @@ forge install OpenZeppelin/openzeppelin-contracts --no-git
 forge install foundry-rs/forge-std --no-git
 forge install smartcontractkit/foundry-chainlink-toolkit --no-git
 forge install Recon-Fuzz/chimera@0.1.4 --no-git
+forge install GNSPS/solidity-bytes-utils --no-git
+forge install LayerZero-Labs/LayerZero --no-git
 ```
 
 Chimera is pinned to `0.1.4` because the fuzzing harness is written against that
 version's API.
+
+The last two are transitive dependencies of LayerZero's `TestHelperOz5`, which the
+cross-chain tests build on: `solidity-bytes-utils` for `BytesLib`, and the LayerZero
+V1 repo for the V1 interfaces its ULN mocks still reference.
 
 ## To run tests do:
 

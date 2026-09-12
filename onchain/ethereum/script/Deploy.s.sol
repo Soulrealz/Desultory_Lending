@@ -7,6 +7,7 @@ import { Config } from "./Config.s.sol";
 import { Desultory } from "../src/Desultory.sol";
 import { Position } from "../src/PositionNFT.sol";
 import { DUSD } from "../src/DUSD.sol";
+import { Adapter } from "../src/crosschain/Adapter.sol";
 
 contract Deploy is Script
 {
@@ -20,6 +21,7 @@ contract Deploy is Script
     Desultory desultory;
     Position position;
     DUSD dusd;
+    Adapter adapter;
 
     function run() external returns (address, address, address)
     {
@@ -36,13 +38,25 @@ contract Deploy is Script
         rates = [400, 200];
 
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        // the account that actually performs the CREATEs below, and therefore the
+        // one every Ownable deployed here must be owned by
+        address deployer = vm.addr(deployerKey);
         vm.startBroadcast(deployerKey);
 
         position = new Position("Desultor", "DST");
-        dusd = new DUSD("DesultoryUSD", "DUSD");
+        dusd = new DUSD("DesultoryUSD", "DUSD", config.lz(), deployer);
         desultory = new Desultory(
             tokenAddresses, priceFeedAddresses, feedDecimals, tokenDecimals, ltvRatios, rates, address(position), address(dusd)
         );
+
+        dusd.setMinter(address(desultory), true);
+
+        // Peers and allowed destinations are per-deployment configuration and are
+        // deliberately NOT set here: a single-chain local deploy has no peer.
+        adapter = new Adapter(config.lz(), deployer, address(dusd));
+        adapter.setDesultory(address(desultory));
+        dusd.setMinter(address(adapter), true);
+        desultory.setAdapter(address(adapter));
 
         position.setProtocol(address(desultory));
         position.transferOwnership(address(desultory));
