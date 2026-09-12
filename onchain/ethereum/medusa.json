@@ -1,0 +1,23 @@
+{
+  "fuzzing": {
+    "workers": 3,
+    "callSequenceLength": 100,
+    "corpusDirectory": "medusa-corpus",
+    "targetContracts": ["CryticTester"],
+    "testLimit": 100000,
+    "transactionGasLimit": 12500000,
+    "testing": {
+      "stopOnFailedTest": false,
+      "assertionTesting": { "enabled": true },
+      "propertyTesting": { "enabled": false },
+      "optimizationTesting": { "enabled": false }
+    }
+  },
+  "compilation": {
+    "platform": "crytic-compile",
+    "platformConfig": {
+      "target": ".",
+      "args": ["--foundry-compile-all"]
+    }
+  }
+}

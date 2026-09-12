@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 5db9f71
+verified-against: 620ff7d
 ---
 
 # Accounting
@@ -89,13 +89,36 @@ borrow then immediately repay) can never return more than was put in. This is
 asserted by fuzz tests `testFuzzDepositWithdrawNeverProfits` and
 `testFuzzBorrowRepayNeverProfits`.
 
-## Known inconsistency
+## The accrual leak (found and fixed)
 
-`accrue()` computes `totalDebt` with `__fromScaledDown`, while `getUtilization()`
-computes the same quantity with `__fromScaledUp`. The two disagree by at most 1 wei,
-so the practical effect is negligible — but it is an inconsistency, not a deliberate
-choice, and it is exactly the kind of thing the fuzzing harness should be pointed at.
-See [[Audit]].
+`accrue()` used to charge borrowers and pay lenders from two different numbers.
+
+It computed a notional figure, `interest = totalDebt * factor / WAD`, credited
+`reserves` a tenth of it exactly, and grew `liquidityIndex` to hand lenders the other
+nine tenths. But borrowers' debt does not grow by `interest` — it grows by whatever
+`borrowIndex += borrowIndex * factor / WAD` produces. That truncation discards up to
+one wei **of the index**, which is then multiplied by `totalScaledBorrows`. At ~1e23
+scaled borrows, one truncated wei of index is roughly 1e5 wei of real debt that was
+distributed but never charged.
+
+Per accrual it is a coin flip on truncation direction; the losses accumulate because
+nothing claws back the gains. The pool ends up owing more than it holds — rounding in
+the wrong direction, against the policy above.
+
+The fix charges borrowers first and distributes exactly what was charged:
+
+```solidity
+pool.borrowIndex += (pool.borrowIndex * factor) / WAD;
+uint256 interest = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex) - totalDebt;
+```
+
+`totalDebt` is now read with `__fromScaledUp`, matching `getUtilization` — which also
+resolves a previously-documented inconsistency between the two.
+
+Found by the Chimera harness, not by review: it had survived in working, tested code.
+Reproduced in isolation by `test/recon/AccrualLeak.t.sol`. Note that the first accrual
+from a pristine `borrowIndex == WAD` cannot leak, so only long, messy sequences
+surface it. See [[Invariants]].
 
 ## Where the money physically is
 

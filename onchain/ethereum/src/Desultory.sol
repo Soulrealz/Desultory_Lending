@@ -423,6 +423,23 @@ contract Desultory {
     }
 
     /**
+     * @dev raw scaled deposit balance. Real value is scaled * liquidityIndex / WAD.
+     * Exposed so invariant tests can assert that the per-position scaled balances
+     * sum to pool.totalScaledDeposits — an identity that is not recoverable from
+     * the unscaled getters, because each of those rounds independently.
+     */
+    function getScaledDeposit(uint256 position, address token) external view returns (uint256) {
+        return __scaledDeposits[position][token];
+    }
+
+    /**
+     * @dev raw scaled borrow balance. Real value is scaled * borrowIndex / WAD.
+     */
+    function getScaledBorrow(uint256 position, address token) external view returns (uint256) {
+        return __scaledBorrows[position][token];
+    }
+
+    /**
      * @dev liquidity users may borrow/withdraw: deposits − debt. The actual
      * cash on hand is deposits + reserves − debt, so capping flows here keeps
      * the protocol reserves' cash backing intact.
@@ -613,19 +630,29 @@ contract Desultory {
         }
         pool.lastUpdate = uint40(block.timestamp);
 
-        uint256 totalDebt = __fromScaledDown(pool.totalScaledBorrows, pool.borrowIndex);
+        uint256 totalDebt = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex);
         if (totalDebt == 0) {
             emit IndexUpdate(token, block.timestamp, pool.borrowIndex, pool.liquidityIndex);
             return;
         }
 
+        // rate and factor are taken from pre-accrual utilization
         uint32 rate = getBorrowRate(token, getUtilization(token));
         uint256 factor = (uint256(rate) * dt * WAD) / (SECONDS_PER_YEAR * MAX_BPS);
 
-        uint256 interest = (totalDebt * factor) / WAD;
-        uint256 toReserves = (interest * RESERVE_FACTOR) / MAX_BPS;
-
+        // Charge borrowers FIRST, then distribute exactly what was charged.
+        //
+        // Deriving `interest` from a notional totalDebt * factor / WAD instead
+        // lets the pool pay out more than it took in: the debt actually charged
+        // comes from truncating the *index*, and that lost sub-wei of index is
+        // multiplied by totalScaledBorrows. At ~1e23 scaled borrows a single
+        // truncated wei of index is ~1e5 wei of real debt, handed to lenders and
+        // reserves regardless. It compounds, and the pool ends up owing more
+        // than it holds. Found by the Chimera harness; see test/recon/AccrualLeak.t.sol.
         pool.borrowIndex += (pool.borrowIndex * factor) / WAD;
+        uint256 interest = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex) - totalDebt;
+
+        uint256 toReserves = (interest * RESERVE_FACTOR) / MAX_BPS;
         pool.reserves += toReserves;
 
         uint256 totalDeposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
