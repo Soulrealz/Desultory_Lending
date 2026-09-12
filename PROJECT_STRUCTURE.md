@@ -24,9 +24,11 @@ Desultory_Lending/
 │   │   └── Liquidations.md     # Documents the engine's defects; the module is broken
 │   ├── Decisions/              # MAINTAINED: numbered ADRs, superseded rather than edited
 │   │   ├── Decisions.md        # Zone index and status conventions
-│   │   └── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
+│   │   ├── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
+│   │   └── 0002-internal-consistency-invariants.md  # ADR: fuzz internal consistency, not solvency
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
+│   │   ├── Invariants.md       # The six fuzzing invariants in prose, and what they found
 │   │   └── 2026-06-10-project-assessment.md  # State-of-the-project audit
 │   └── Notes/                  # NOT maintained: research and scratch thinking
 │       ├── Notes.md            # Zone index
@@ -34,7 +36,9 @@ Desultory_Lending/
 │       └── Log/                # Dated working notes
 └── onchain/
     └── ethereum/               # Foundry project (solc 0.8.28)
-        ├── README.md           # Dependency install + test instructions
+        ├── README.md           # Dependency install (--no-git), test + fuzzing instructions
+        ├── echidna.yaml        # Echidna campaign config (assertion mode)
+        ├── medusa.json         # Medusa campaign config (assertion mode)
         ├── foundry.toml
         ├── remappings.txt
         ├── script/
@@ -53,6 +57,14 @@ Desultory_Lending/
         └── test/
             ├── Desultory.t.sol # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, fuzz
             ├── Position.t.sol  # Position NFT unit tests (mint auth, health-gated transfers)
+            ├── recon/          # Chimera stateful fuzzing harness (Medusa + Echidna)
+            │   ├── Setup.sol           # Deploys the system as Deploy.s.sol does, plus 3 actors
+            │   ├── BeforeAfter.sol     # Per-token state snapshots around every call
+            │   ├── Properties.sol      # The six internal-consistency invariants
+            │   ├── TargetFunctions.sol # Clamped call surface; no liquidation targets
+            │   ├── CryticTester.sol    # Fuzzer entrypoint
+            │   ├── CryticToFoundry.sol # Replays counterexamples as Foundry tests
+            │   └── AccrualLeak.t.sol   # Regression test for the accrual leak the fuzzer found
             └── mocks/
                 ├── MockERC20.sol
                 ├── MockLZ.sol            # LayerZero endpoint mock (currently unused)

@@ -9,4 +9,5 @@ invariant nobody can review.
 
 ## Notes
 
+- [[Invariants]] — the six properties the fuzzing harness asserts, and why
 - [[2026-06-10-project-assessment]] — state-of-the-project audit: what works, what is broken

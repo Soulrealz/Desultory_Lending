@@ -1,0 +1,8 @@
+testMode: assertion
+testLimit: 100000
+seqLen: 100
+corpusDir: echidna-corpus
+coverage: true
+# Foundry projects only compile src/ by default under crytic-compile, which
+# leaves CryticTester (in test/recon/) out of the build entirely.
+cryticArgs: ["--foundry-compile-all"]

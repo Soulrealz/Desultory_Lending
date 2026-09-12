@@ -13,3 +13,9 @@ docs/.obsidian/workspace.json
 docs/.obsidian/workspace-mobile.json
 docs/.obsidian/cache
 docs/.obsidian/graph-view-state.json
+
+# Fuzzing run artifacts
+onchain/ethereum/echidna-corpus/
+onchain/ethereum/medusa-corpus/
+onchain/ethereum/crytic-export/
+onchain/ethereum/foundry.lock

@@ -24,7 +24,12 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   `accrue(token)` runs at the top of every state-changing call: borrowers pay
   `getBorrowRate(utilization)`, 10% of interest goes to `pool.reserves`
   (RESERVE_FACTOR), 90% grows the liquidity index. Rounding always favors the
-  pool (deposits round down, debts round up).
+  pool (deposits round down, debts round up). `accrue` charges borrowers **first**
+  and then distributes exactly what was charged — deriving the interest from a
+  pre-computed notional instead let the pool pay out more than it took in (found by
+  the fuzzer; see `docs/Protocol/Accounting.md`).
+- `getScaledDeposit`/`getScaledBorrow` expose raw scaled balances so invariant tests
+  can assert they sum to the pool totals.
 - Interest: 4-bracket kinked rate model (`getBorrowRate`) — unchanged in shape;
   a latent uint16 overflow in the low bracket was fixed (uint32 cast).
 - `getValueUSD` returns 18-decimal USD, normalizing feed decimals and token
@@ -66,9 +71,19 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   transfers Position ownership to Desultory. Reads `PRIVATE_KEY` env var.
 
 ### `test/`
-- `Desultory.t.sol` — 21 tests: deposit/withdraw/borrow/repay on the positionId
+- `Desultory.t.sol` — 22 tests: deposit/withdraw/borrow/repay on the positionId
   API, interest accrual & lender yield (incl. 10% reserve check), NFT-transfer
-  control handoff, unhealthy-transfer gating, and fuzz invariants for the
-  rounding/solvency policy. Liquidation paths remain untested on purpose.
+  control handoff, unhealthy-transfer gating, scaled-getter reconstruction, and
+  stateless fuzz invariants for the rounding/solvency policy. Liquidation paths
+  remain untested on purpose.
 - `Position.t.sol` — 7 unit tests for mint auth, `setProtocol` wiring, and the
   health-gated `_update` hook (via a stub protocol).
+- `recon/` — **Chimera stateful fuzzing harness**, driven by both Medusa and Echidna
+  from one scaffold (`Setup` → `BeforeAfter` → `Properties` → `TargetFunctions` →
+  `CryticTester`/`CryticToFoundry`). Three actors, clamped targets over
+  deposit/withdraw/borrow/repay plus time warps and wide oracle price movement.
+  Asserts six internal-consistency invariants; economic solvency is deliberately not
+  asserted, and liquidation entry points are absent from the target surface. Prose
+  statement of the invariants is in `docs/Audit/Invariants.md`; the reasoning is ADR
+  0002. `AccrualLeak.t.sol` is the regression test for the accrual bug this harness
+  found.

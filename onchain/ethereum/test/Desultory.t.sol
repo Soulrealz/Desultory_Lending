@@ -452,4 +452,41 @@ contract DesultoryTest is Test {
         uint256 lenderClaim = desultory.getPositionCollateralForToken(1, usdc);
         assertLe(lenderClaim + pool.reserves, MockERC20(usdc).balanceOf(address(desultory)) + 1);
     }
+
+    ///////////////////////
+    // Scaled Getter Tests
+    ///////////////////////
+
+    function testScaledGettersMatchUnscaled() public {
+        vm.startPrank(alice);
+        desultory.deposit(0, weth, 10e18);
+        desultory.borrow(1, weth, 1e18);
+        vm.stopPrank();
+
+        // let interest accrue so the indexes diverge from WAD
+        vm.warp(block.timestamp + 180 days);
+        vm.prank(alice);
+        desultory.deposit(1, weth, 1e18);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(weth);
+
+        uint256 scaledDep = desultory.getScaledDeposit(1, weth);
+        uint256 scaledBor = desultory.getScaledBorrow(1, weth);
+
+        assertGt(scaledDep, 0, "scaled deposit should be non-zero");
+        assertGt(scaledBor, 0, "scaled borrow should be non-zero");
+        assertGt(pool.borrowIndex, WAD, "borrowIndex should have grown");
+
+        // deposits reconstruct with __fromScaledDown, debts with __fromScaledUp
+        assertEq(
+            scaledDep * pool.liquidityIndex / WAD,
+            desultory.getPositionCollateralForToken(1, weth),
+            "scaled deposit must reconstruct the unscaled balance"
+        );
+        assertEq(
+            (scaledBor * pool.borrowIndex + WAD - 1) / WAD,
+            desultory.getPositionBorrowForToken(1, weth),
+            "scaled borrow must reconstruct the unscaled debt"
+        );
+    }
 }
