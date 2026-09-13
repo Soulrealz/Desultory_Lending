@@ -72,23 +72,20 @@ contract CrossChainBorrowTest is TestHelperOz5 {
         wethFeedA = new MockV3Aggregator(18, 3000e18);
         wethA = new MockERC20("WETH", "WETH");
 
-        address[] memory tokenAddresses = new address[](1);
-        tokenAddresses[0] = address(wethA);
-        address[] memory priceFeeds = new address[](1);
-        priceFeeds[0] = address(wethFeedA);
-        uint8[] memory feedDecimals = new uint8[](1);
-        feedDecimals[0] = 18;
-        uint8[] memory tokenDecimals = new uint8[](1);
-        tokenDecimals[0] = 18;
-        uint8[] memory ltvs = new uint8[](1);
-        ltvs[0] = 70;
-        uint16[] memory rates = new uint16[](1);
-        rates[0] = 400;
+        Desultory.TokenConfig[] memory configs = new Desultory.TokenConfig[](1);
+        configs[0] = Desultory.TokenConfig({
+            token: address(wethA),
+            priceFeed: address(wethFeedA),
+            feedDecimals: 18,
+            tokenDecimals: 18,
+            ltvRatio: 70,
+            liquidationThreshold: 75,
+            liquidationBonusBps: 1_000,
+            borrowRate: 400
+        });
 
         positionA = new Position("Desultor", "DST");
-        desultoryA = new Desultory(
-            tokenAddresses, priceFeeds, feedDecimals, tokenDecimals, ltvs, rates, address(positionA), address(dusdA)
-        );
+        desultoryA = new Desultory(configs, address(positionA), address(dusdA));
 
         // order matters: setProtocol must run while the deployer still owns the NFT
         positionA.setProtocol(address(desultoryA));

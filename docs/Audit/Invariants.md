@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 7d9de79
+verified-against: 75a675f
 ---
 
 # Invariants
@@ -11,12 +11,12 @@ in a sentence is an invariant nobody can review.
 Implementation lives in `onchain/ethereum/test/recon/Properties.sol`. The reasoning
 behind this particular set is [[0002-internal-consistency-invariants]].
 
-All eight are **internal-consistency** properties: they constrain the bookkeeping, not
+All eleven are **internal-consistency** properties: they constrain the bookkeeping, not
 the economics. Each holds even when the protocol is underwater, which is what allows
 the fuzzer to move oracle prices between 0.01× and 100× of their starting value
 without generating false alarms.
 
-## The eight
+## The eleven
 
 **1. Scaled balances reconcile.**
 For each token, the per-position scaled deposits sum to `pool.totalScaledDeposits`,
@@ -60,11 +60,45 @@ this and nothing else.
 Stated additively rather than as `paidIn - paidOut` because the subtraction would
 panic on underflow in exactly the case it exists to catch.
 
+**7. DUSD supply matches authorization.**
+`ghostDusdMinted == ghostDusdBurned + dusd.totalSupply()`, exactly. The cross-chain
+analogue of invariant 6: the ghost counters record what the harness asked the protocol
+to mint and burn, and the token's own supply must agree. The harness is single-chain, so
+this constrains the debt accounting rather than the messaging — but it is the same
+question a multi-chain deployment has to answer, which is why it is stated this way.
+
+**8. Scaled DUSD debt reconciles.**
+Per-position `getScaledDusdDebt` sums to `totalScaledDusdDebt`. Exact equality, for the
+same reason as invariant 1: raw stored integers, no rounding in the summation. DUSD debt
+lives in its own storage outside `__pools`, so invariant 1 does not cover it.
+
+**9. Bad debt never decreases.**
+`totalBadDebtUSD` is a monotone record of recognized loss; nothing in the protocol
+decrements it, so the harness's ghost copy must never see it fall.
+
+**10. A healthy position is never liquidatable.**
+For every position with `healthFactor >= WAD`, `isPositionHealthy` must be `true`.
+Stated this way round rather than as "an unhealthy position must be liquidatable" —
+the latter would be a stronger, different claim this harness does not need.
+
+**11. The liquidator is never worse off.**
+Checked directly against `LiquidationMath.seizeFromRepay` / `splitBonus` rather than
+through a full `liquidate()` call: for a fixed repay amount, the liquidator's share of
+the seized collateral (after the protocol's cut) must be worth at least what they paid.
+This is deliberately *not* "liquidation improves the health factor" — that claim is
+false by design, since seizing collateral plus a bonus removes more value than the debt
+it retires, so a deeply underwater position gets worse, not better, with every
+liquidation. Asserting it would be asserting a bug that isn't one.
+
 ## Deliberately not asserted
 
-**Economic solvency** (collateral USD ≥ debt USD). Not a property this protocol has
-while [[Liquidations]] is broken. Revisit in Project D, where a ghost bad-debt counter
-makes it meaningful.
+**Economic solvency** (collateral USD ≥ debt USD). [[Liquidations]] is now specified and
+in the target surface, but a large enough price move can still leave the protocol
+genuinely underwater — bad debt is recognized (invariant 9) rather than prevented, so
+this remains a property the system does not claim to have.
+
+**Liquidation improves health factor.** Deliberately excluded, not merely deferred: it is
+false. See invariant 11.
 
 **Liveness** (a debt-free position can always withdraw in full). Valuable, but needs
 try/catch machinery around actor calls. Deferred.
@@ -83,17 +117,33 @@ Two details worth remembering:
   simple sequences are structurally incapable of surfacing it, which is why two
   hand-written probes over 3 and 27 simulated years both passed.
 
-**7. DUSD supply matches authorization.**
-`ghostDusdMinted == ghostDusdBurned + dusd.totalSupply()`, exactly. The cross-chain
-analogue of invariant 6: the ghost counters record what the harness asked the protocol
-to mint and burn, and the token's own supply must agree. The harness is single-chain, so
-this constrains the debt accounting rather than the messaging — but it is the same
-question a multi-chain deployment has to answer, which is why it is stated this way.
+**`property_borrowIndexOutpacesLiquidityIndex` failed again once liquidation entered
+the target surface** (Medusa, ~98k calls, two independent shrunk counterexamples).
+Root cause: `_seizeCollateral` moved `pool.totalScaledDeposits` for the seized
+collateral token with no `getAvailableLiquidity`-style bound, unlike `withdraw()` and
+`borrow()` — so seizing collateral in a token pool that is also heavily borrowed
+elsewhere could push that pool's debt above its deposits, which is the precondition
+invariant 3's proof leans on. Echidna's shallower run (reused corpus, ~30k calls) did
+not find it, echoing the note above about engine depth.
 
-**8. Scaled DUSD debt reconciles.**
-Per-position `getScaledDusdDebt` sums to `totalScaledDusdDebt`. Exact equality, for the
-same reason as invariant 1: raw stored integers, no rounding in the summation. DUSD debt
-lives in its own storage outside `__pools`, so invariant 1 does not cover it.
+**Fixed**: `liquidate()`'s existing collateral-held clamp now also bounds
+`seizeAmount` by `getAvailableLiquidity(collateralAsset)`, restoring the same
+debt-never-exceeds-deposits bound `withdraw()`/`borrow()` already enforce, and
+back-solves `repayAmount` from the tighter cap exactly as it already did for the
+collateral-held case. Regression test:
+`test/Desultory.t.sol:testSeizureIsBoundedByAvailableLiquidity`. See
+`.superpowers/sdd/2026-09-12-liquidation-engine/task-7-report.md` for the
+investigation, fix, and both engines' re-run results. This is the second real bug
+this harness has found in reviewed code, after the accrual leak above — the argument
+for running it before the cross-chain work extends the accounting, made in
+[[0002-internal-consistency-invariants]], has now paid off twice.
+
+A wei-scale rounding seam was found and deliberately left in place rather than
+patched: the availability bound is computed in token units, but `_seizeCollateral`
+converts with `__toScaledUp` (rounds up), so a seizure that exactly saturates the cap
+can leave a pool's deposits 1–2 wei below its debt. It cannot trigger invariant 3
+(which needs roughly a 10% deficit) and is recorded as a known limitation in
+[[Liquidations]] rather than fixed with an unexplained `-1`.
 
 ## Running them
 
@@ -109,4 +159,4 @@ Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 - [[Accounting]] — the accrual math these constrain
 - [[Cross-Chain]] — the DUSD debt accounting invariants 7 and 8 constrain
 - [[0002-internal-consistency-invariants]] — why this set and not another
-- [[Liquidations]] — the excluded surface
+- [[Liquidations]] — the surface invariants 9-11 constrain

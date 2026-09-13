@@ -17,5 +17,6 @@ which is what [[Protocol]] is for.
 ## Records
 
 - [[0001-nft-as-position]] — the Position NFT is the source of truth for position ownership
-- [[0002-internal-consistency-invariants]] — fuzz for internal consistency, not economic solvency
+- [[0002-internal-consistency-invariants]] — fuzz for internal consistency, not economic solvency (**superseded** on the solvency point by 0004)
 - [[0003-dusd-only-cross-chain-borrowing]] — only DUSD crosses chains; every position has one home chain
+- [[0004-liquidation-engine]] — single-entry-point liquidation, clamp-and-count bad debt

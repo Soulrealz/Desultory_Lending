@@ -4,11 +4,13 @@ pragma solidity 0.8.28;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // Other contracts
 import "./PositionNFT.sol";
 import "./DUSD.sol";
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
+import {LiquidationMath} from "./libraries/LiquidationMath.sol";
 
 /**
  * @dev the slice of the cross-chain Adapter the accounting core needs.
@@ -25,15 +27,14 @@ interface IAdapter {
         payable;
 }
 
-contract Desultory is Ownable {
+contract Desultory is Ownable, ReentrancyGuard {
     ////////////////////////
     // Errors
     ////////////////////////
     error Desultory__ZeroAmount();
-    error Desultory__LTVRatioNotBroken();
     error Desultory__WithdrawalWillViolateLTV();
     error Desultory__CollateralValueNotEnough();
-    error Desultory__AddressesAndFeedsDontMatch();
+    error Desultory__InvalidRiskParams(address token);
     error Desultory__NoExistingBorrow(address token);
     error Desultory__TokenNotWhitelisted(address token);
     error Desultory__NotPositionOwner(uint256 positionId);
@@ -43,9 +44,8 @@ contract Desultory is Ownable {
     error Desultory__NoDusdDebt(uint256 positionId);
     error Desultory__AdapterNotSet();
     error Desultory__DestinationNotAllowed(uint32 eid);
-
-    //@dev
-    error NotImplemented();
+    error Desultory__NotLiquidatable(uint256 positionId, uint256 healthFactor);
+    error Desultory__NoDebtInAsset(uint256 positionId, address asset);
 
     ////////////////////////
     // Events
@@ -56,18 +56,22 @@ contract Desultory is Ownable {
     event Repayment(uint256 indexed position, address indexed token, uint256 amount);
     event Withdrawal(uint256 indexed position, address indexed token, uint256 amount);
     event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);
-    event DebtRepayment(
-        address indexed liquidator, uint256 indexed debtor, address indexed repaidAsset, uint256 amountLiquidated
-    );
-    event AssetLiquidation(
-        address indexed liquidator, uint256 indexed debtor, address indexed liquidatedAsset, uint256 amountLiquidated
-    );
     event AdapterSet(address indexed adapter);
     event DestinationSet(uint32 indexed eid, bool allowed);
     event DusdStabilityFeeSet(uint16 bps);
     event DusdBorrow(uint256 indexed position, address indexed recipient, uint256 amount, uint32 dstEid);
     event DusdRepay(uint256 indexed position, address indexed payer, uint256 amount);
     event DusdIndexUpdate(uint256 timestamp, uint256 dusdBorrowIndex, uint256 dusdReserves);
+    event Liquidation(
+        address indexed liquidator,
+        uint256 indexed position,
+        address debtAsset,
+        address collateralAsset,
+        uint256 repaid,
+        uint256 seized,
+        uint256 protocolCut
+    );
+    event BadDebtRecorded(uint256 indexed positionId, uint256 amountUSD);
 
     ///////////////////////
     // Types & interfaces
@@ -80,11 +84,26 @@ contract Desultory is Ownable {
     ////////////////////////
 
     struct Collateral {
-        address priceFeed;
+        address priceFeed; // 20 bytes
         uint8 feedDecimals; // decimals of the Chainlink price feed
         uint8 tokenDecimals; // decimals of the ERC20 itself
-        uint8 ltvRatio; // Loan To Value ratio that this asset provides
-        uint16 borrowRate; // Per-asset rate multiplier, 100 = 1x
+        uint8 ltvRatio; // borrow cap, percent
+        uint8 liquidationThreshold; // seize line, percent — strictly above ltvRatio
+        uint16 liquidationBonusBps; // discount handed to a liquidator
+        uint16 borrowRate; // per-asset rate multiplier, 100 = 1x
+    } // 28 bytes — still one slot
+
+    /// @dev one struct instead of six parallel arrays: mismatched lengths become
+    /// unrepresentable, and eight arrays would risk stack-too-deep in the constructor.
+    struct TokenConfig {
+        address token;
+        address priceFeed;
+        uint8 feedDecimals;
+        uint8 tokenDecimals;
+        uint8 ltvRatio;
+        uint8 liquidationThreshold;
+        uint16 liquidationBonusBps;
+        uint16 borrowRate;
     }
 
     struct Interest {
@@ -122,11 +141,6 @@ contract Desultory is Ownable {
     mapping(uint256 position => mapping(address token => uint256 scaled)) private __scaledDeposits;
     mapping(uint256 position => mapping(address token => uint256 scaled)) private __scaledBorrows;
 
-    // Liquidation Variables (redesign pending — see docs/Audit/2026-06-10-project-assessment.md point 4)
-    uint256 private __liquidationPenalty = 10;
-    uint256 private __liquidationPenaltyProtocol = 3;
-    mapping(address token => uint256 amount) private __profit;
-
     // Token Variables
     mapping(address token => Collateral info) private __tokenInfos;
     mapping(uint256 tokenId => address token) private __tokenList;
@@ -144,6 +158,16 @@ contract Desultory is Ownable {
     uint256 public dusdReserves;
     mapping(uint256 position => uint256 scaled) private __scaledDusdDebt;
 
+    /**
+     * @dev USD value of debt recognized as uncollectable, 18 decimals.
+     *
+     * A monotone counter of RECOGNIZED loss, snapshotted at the moment collateral ran out.
+     * It does not track prices afterward and is not decremented if the position is later
+     * topped up. Anything better needs a loss-allocation policy, which is deliberately not
+     * part of this project — nothing here writes down liquidityIndex.
+     */
+    uint256 public totalBadDebtUSD;
+
     // Cross-chain Configuration
     address public adapter;
     mapping(uint32 eid => bool allowed) public allowedDestination;
@@ -152,6 +176,8 @@ contract Desultory is Ownable {
     // Interest Variables
     Interest private __interest;
     uint16 private constant MAX_BPS = 10_000; // 100%
+    uint16 private constant MAX_BONUS_BPS = 2_000; // 20% — constructor cap
+    uint16 private constant LIQ_PROTOCOL_SHARE = 3_000; // 30% of the bonus
     uint16 private constant RESERVE_FACTOR = 1_000; // 10% of borrow interest to the protocol
     uint256 private constant WAD = 1e18;
     uint256 private constant SECONDS_PER_YEAR = 365 days;
@@ -188,28 +214,32 @@ contract Desultory is Ownable {
     // constructor
     ////////////////////////
 
-    constructor(
-        address[] memory tokenAddresses,
-        address[] memory priceFeeds,
-        uint8[] memory feedDecimals,
-        uint8[] memory tokenDecimals,
-        uint8[] memory ltvs,
-        uint16[] memory rates,
-        address _positionContract,
-        address _DUSDContract
-    ) Ownable(msg.sender) {
-        if (
-            ltvs.length != priceFeeds.length || ltvs.length != tokenAddresses.length
-                || ltvs.length != feedDecimals.length || ltvs.length != tokenDecimals.length || ltvs.length != rates.length
-        ) {
-            revert Desultory__AddressesAndFeedsDontMatch();
-        }
+    constructor(TokenConfig[] memory configs, address _positionContract, address _DUSDContract)
+        Ownable(msg.sender)
+    {
+        for (uint256 i = 0; i < configs.length; i++) {
+            TokenConfig memory c = configs[i];
 
-        for (uint256 i = 0; i < tokenAddresses.length; i++) {
-            __tokenInfos[tokenAddresses[i]] =
-                Collateral(priceFeeds[i], feedDecimals[i], tokenDecimals[i], ltvs[i], rates[i]);
-            __tokenList[i] = tokenAddresses[i];
-            __pools[tokenAddresses[i]] = Pool({
+            // a threshold at or below the LTV leaves no buffer band: the position would
+            // become liquidatable at the exact instant it reached maximum borrow.
+            if (
+                c.liquidationThreshold <= c.ltvRatio || c.liquidationThreshold > 100
+                    || c.liquidationBonusBps > MAX_BONUS_BPS
+            ) {
+                revert Desultory__InvalidRiskParams(c.token);
+            }
+
+            __tokenInfos[c.token] = Collateral(
+                c.priceFeed,
+                c.feedDecimals,
+                c.tokenDecimals,
+                c.ltvRatio,
+                c.liquidationThreshold,
+                c.liquidationBonusBps,
+                c.borrowRate
+            );
+            __tokenList[i] = c.token;
+            __pools[c.token] = Pool({
                 liquidityIndex: WAD,
                 borrowIndex: WAD,
                 totalScaledDeposits: 0,
@@ -219,7 +249,7 @@ contract Desultory is Ownable {
             });
         }
 
-        __supportedTokensCount = tokenAddresses.length;
+        __supportedTokensCount = configs.length;
         dusdBorrowIndex = WAD;
         __dusdLastUpdate = uint40(block.timestamp);
         dusdStabilityFeeBps = 200; // 2% annual default
@@ -423,6 +453,140 @@ contract Desultory is Ownable {
         emit Repayment(positionId, token, amount);
     }
 
+    /**
+     * @dev seize collateral from an under-water position in exchange for retiring its debt.
+     *
+     * Replaces an engine with seven catalogued defects. The ones that shaped this:
+     * value moves by allowance and never from protocol funds; the bonus is a bonus, not a
+     * haircut; seizure is bounded by a close factor; and everything accrues before anything
+     * is read.
+     *
+     * @param positionId the position to liquidate
+     * @param debtAsset which debt to retire — DUSD or any whitelisted token
+     * @param collateralAsset which collateral to seize
+     * @param repayAmount how much debt to retire; clamped down to the close factor
+     */
+    function liquidate(uint256 positionId, address debtAsset, address collateralAsset, uint256 repayAmount)
+        external
+        nonReentrant
+        moreThanZero(repayAmount)
+        isAllowedToken(collateralAsset)
+    {
+        if (debtAsset != address(__DUSD) && __tokenInfos[debtAsset].priceFeed == address(0)) {
+            revert Desultory__TokenNotWhitelisted(debtAsset);
+        }
+        if (!__positionContract.exists(positionId)) {
+            revert Desultory__PositionDoesNotExist(positionId);
+        }
+
+        _accrueAll();
+
+        // clamp, rather than revert, so a bot that loses a race takes a partial fill
+        // instead of burning a transaction. hf and debt are only needed to derive maxRepay
+        // and are scoped to this block so they don't sit on the stack for the rest of the
+        // function — maxRepay itself is kept alive below so the close-factor bound stays
+        // locally evident at its second use.
+        uint256 maxRepay;
+        {
+            uint256 hf = healthFactor(positionId);
+            if (hf >= WAD) {
+                revert Desultory__NotLiquidatable(positionId, hf);
+            }
+
+            uint256 debt = _debtInAsset(positionId, debtAsset);
+            if (debt == 0) {
+                revert Desultory__NoDebtInAsset(positionId, debtAsset);
+            }
+
+            maxRepay = (debt * LiquidationMath.closeFactorBps(hf)) / MAX_BPS;
+        }
+        if (repayAmount > maxRepay) {
+            repayAmount = maxRepay;
+        }
+
+        uint16 bonusBps = __tokenInfos[collateralAsset].liquidationBonusBps;
+
+        uint256 seizeAmount = _usdToTokenAmount(
+            collateralAsset, LiquidationMath.seizeFromRepay(_debtValueUSD(debtAsset, repayAmount), bonusBps)
+        );
+
+        // The position may not hold enough, and the pool may not have enough uncommitted
+        // liquidity to give up (collateral pools back other positions' debt too — the same
+        // bound withdraw() and borrow() already enforce via getAvailableLiquidity, and the
+        // one _seizeCollateral itself does not check). Cap the seizure at the lesser of what
+        // is there and what the pool can spare, and recompute the repayment DOWN from the
+        // capped figure — charging the original amount for a short delivery is the same
+        // class of bug as paying out in the wrong token.
+        uint256 seizeCap = getPositionCollateralForToken(positionId, collateralAsset);
+        {
+            uint256 availableLiquidity = getAvailableLiquidity(collateralAsset);
+            if (availableLiquidity < seizeCap) {
+                seizeCap = availableLiquidity;
+            }
+        }
+        if (seizeAmount > seizeCap) {
+            seizeAmount = seizeCap;
+            repayAmount = _debtAmountFromUSD(
+                debtAsset, LiquidationMath.repayFromSeize(getValueUSD(collateralAsset, seizeAmount), bonusBps)
+            );
+
+            // the recomputed repayment can still exceed the close-factor bound when rounding
+            // runs the wrong way; clamp to the same maxRepay computed above rather than to
+            // debt itself, so the close-factor bound stays locally evident here too
+            if (repayAmount > maxRepay) {
+                repayAmount = maxRepay;
+            }
+            if (repayAmount == 0) {
+                revert Desultory__ZeroAmount();
+            }
+        }
+
+        uint256 baseAmount = LiquidationMath.repayFromSeize(seizeAmount, bonusBps);
+        (uint256 protocolCut, uint256 toLiquidator) =
+            LiquidationMath.splitBonus(baseAmount, seizeAmount, LIQ_PROTOCOL_SHARE);
+
+        // --- effects, then an external call ---
+        // _retireDebt itself performs an external call (DUSD burn, or safeTransferFrom for a
+        // pool asset) rather than pure bookkeeping. That is safe here despite sitting after
+        // _seizeCollateral: this function is nonReentrant, and the only other entry points
+        // that read this position's state (withdraw/borrow) are bounded by accounting figures
+        // this call has already updated, not by a balance check that a reentrant call could
+        // race ahead of.
+        _seizeCollateral(positionId, collateralAsset, seizeAmount, protocolCut);
+        _retireDebt(positionId, debtAsset, repayAmount);
+
+        // --- interactions ---
+        IERC20(collateralAsset).safeTransfer(msg.sender, toLiquidator);
+
+        _recordBadDebtIfStranded(positionId);
+
+        emit Liquidation(
+            msg.sender, positionId, debtAsset, collateralAsset, repayAmount, seizeAmount, protocolCut
+        );
+    }
+
+    /**
+     * @dev remove seized collateral from the position and book the protocol's cut.
+     *
+     * The scaled conversion rounds UP: the borrower gives up at least the scaled amount the
+     * seizure warrants, which is the same direction withdraw() uses.
+     *
+     * The cut stays denominated in the seized token and lands in that pool's reserves, so it
+     * never leaves the contract — which is why custody still reconciles: deposits fall by
+     * `seizeAmount`, the balance falls by `seizeAmount - protocolCut`, reserves rise by
+     * `protocolCut`.
+     */
+    function _seizeCollateral(uint256 positionId, address collateralAsset, uint256 seizeAmount, uint256 protocolCut)
+        private
+    {
+        Pool storage pool = __pools[collateralAsset];
+        uint256 scaled = __toScaledUp(seizeAmount, pool.liquidityIndex);
+
+        __scaledDeposits[positionId][collateralAsset] -= scaled;
+        pool.totalScaledDeposits -= scaled;
+        pool.reserves += protocolCut;
+    }
+
     ////////////////////////
     // DUSD Debt
     ////////////////////////
@@ -537,62 +701,71 @@ contract Desultory is Ownable {
         emit DusdRepay(positionId, msg.sender, amount);
     }
 
-    /**
-     * @dev LIQUIDATIONS ARE PENDING REDESIGN (docs/Audit/2026-06-10-project-assessment.md point 4).
-     * These two functions are only mechanically re-pointed at the new scaled
-     * storage so the contract compiles; their economics are known-broken
-     * (wrong-token payout, zero-rounding proportions, over-seizure) and they
-     * remain untested on purpose.
-     */
-    function liquidateAssetPosition(uint256 position, address tokenToRepay, address tokenToLiquidate) external {
-        if (isPositionHealthy(position)) {
-            revert Desultory__LTVRatioNotBroken();
-        }
-
-        uint256 totalDebt = getPositionBorrowForToken(position, tokenToRepay);
-        uint256 collateralToTransfer = settleDebtSeizeCollateral(position, tokenToRepay, tokenToLiquidate);
-        uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
-        if (liquidatorFunds >= totalDebt) {
-            IERC20(tokenToRepay).safeTransferFrom(msg.sender, address(this), totalDebt);
-            // @bug known: pays collateral amount in the repay token; pending redesign
-            IERC20(tokenToRepay).safeTransfer(msg.sender, collateralToTransfer);
-        } else {
-            if (IERC20(tokenToRepay).balanceOf(address(this)) >= totalDebt) {
-                uint256 protocolLiquidationReward = collateralToTransfer * __liquidationPenaltyProtocol / 100;
-                __profit[tokenToLiquidate] += collateralToTransfer - protocolLiquidationReward;
-                IERC20(tokenToRepay).safeTransfer(msg.sender, protocolLiquidationReward);
-            } else {
-                //@todo call flash
-                revert NotImplemented();
-            }
-        }
-
-        emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
-        emit AssetLiquidation(msg.sender, position, tokenToLiquidate, collateralToTransfer);
+    /// @dev a position's debt in one asset, DUSD or a pool token
+    function _debtInAsset(uint256 positionId, address asset) private view returns (uint256) {
+        return asset == address(__DUSD)
+            ? getPositionDusdDebt(positionId)
+            : getPositionBorrowForToken(positionId, asset);
     }
 
-    function liquidateProportionalPosition(uint256 position, address tokenToRepay) external {
-        if (isPositionHealthy(position)) {
-            revert Desultory__LTVRatioNotBroken();
+    /// @dev USD value of a debt-asset amount. DUSD has no price feed and is valued at
+    /// par (see userBorrowedAmountUSD); every other asset prices through getValueUSD.
+    function _debtValueUSD(address asset, uint256 amount) private view returns (uint256) {
+        return asset == address(__DUSD) ? amount : getValueUSD(asset, amount);
+    }
+
+    /// @dev inverse of _debtValueUSD. DUSD is valued at par in both directions; any other
+    /// debt asset goes through the oracle. Using a different convention in each direction
+    /// would make the back-solve disagree with the health factor.
+    function _debtAmountFromUSD(address asset, uint256 usdAmount) private view returns (uint256) {
+        return asset == address(__DUSD) ? usdAmount : _usdToTokenAmount(asset, usdAmount);
+    }
+
+    /**
+     * @dev recognize uncollectable debt once a position has no collateral left anywhere.
+     *
+     * Checked across ALL collateral, not just the asset seized: a position with WETH gone
+     * but USDC remaining is still collateralized and still liquidatable by someone else.
+     */
+    function _recordBadDebtIfStranded(uint256 positionId) private {
+        if (userCollateralValueUSD(positionId) > 0) {
+            return;
         }
 
-        uint256 totalDebt = getPositionBorrowForToken(position, tokenToRepay);
-        uint256 liquidatorFunds = IERC20(tokenToRepay).balanceOf(msg.sender);
+        uint256 remaining = userBorrowedAmountUSD(positionId);
+        if (remaining == 0) {
+            return;
+        }
 
-        if (liquidatorFunds >= totalDebt) {
-            Pool storage debtPool = __pools[tokenToRepay];
-            debtPool.totalScaledBorrows -= __scaledBorrows[position][tokenToRepay];
-            __scaledBorrows[position][tokenToRepay] = 0;
+        totalBadDebtUSD += remaining;
+        emit BadDebtRecorded(positionId, remaining);
+    }
 
-            (address[] memory collateralTokens, uint256 totalCollateralUSD) = getPositionFullCollateralData(position);
-            uint256 liquidationValueUSD = getValueUSD(tokenToRepay, totalDebt) * (100 - __liquidationPenalty) / 100;
+    /**
+     * @dev retire `amount` of a position's debt in `asset`, taking the value from the
+     * liquidator. Scaled conversion rounds DOWN so the repayment retires at most the
+     * scaled debt it covers — the pool keeps the remainder, as in repay().
+     */
+    function _retireDebt(uint256 positionId, address asset, uint256 amount) private {
+        if (asset == address(__DUSD)) {
+            uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
+            if (scaled > __scaledDusdDebt[positionId]) {
+                scaled = __scaledDusdDebt[positionId];
+            }
+            __scaledDusdDebt[positionId] -= scaled;
+            totalScaledDusdDebt -= scaled;
 
-            processCollateralLiquidation(position, collateralTokens, totalCollateralUSD, liquidationValueUSD, msg.sender);
-
-            emit DebtRepayment(msg.sender, position, tokenToRepay, totalDebt);
+            __DUSD.burn(msg.sender, amount);
         } else {
-            //@todo call flash
-            revert NotImplemented();
+            Pool storage pool = __pools[asset];
+            uint256 scaled = __toScaledDown(amount, pool.borrowIndex);
+            if (scaled > __scaledBorrows[positionId][asset]) {
+                scaled = __scaledBorrows[positionId][asset];
+            }
+            __scaledBorrows[positionId][asset] -= scaled;
+            pool.totalScaledBorrows -= scaled;
+
+            IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
         }
     }
 
@@ -641,8 +814,46 @@ contract Desultory is Ownable {
         return __pools[token];
     }
 
+    /**
+     * @dev collateral value weighted by each asset's LIQUIDATION THRESHOLD, in USD
+     * (18 decimals). The same loop as userMaxBorrowValueUSD, one weight different:
+     * that one answers "how much may this borrow?", this one "when may it be seized?".
+     */
+    function weightedCollateralUSD(uint256 position) public view returns (uint256) {
+        uint256 totalUSD;
+        for (uint256 i = 0; i < __supportedTokensCount; i++) {
+            address token = __tokenList[i];
+            uint256 amount = getPositionCollateralForToken(position, token);
+            if (amount > 0) {
+                totalUSD += (getValueUSD(token, amount) * __tokenInfos[token].liquidationThreshold / 100);
+            }
+        }
+        return totalUSD;
+    }
+
+    /**
+     * @dev threshold-weighted collateral over total debt, WAD-scaled. Below WAD the
+     * position may be liquidated. type(uint256).max when there is no debt.
+     *
+     * Debt reads through userBorrowedAmountUSD, which already includes DUSD debt at par,
+     * so DUSD debt counts toward liquidation without any special casing here.
+     */
+    function healthFactor(uint256 positionId) public view returns (uint256) {
+        return LiquidationMath.healthFactor(weightedCollateralUSD(positionId), userBorrowedAmountUSD(positionId));
+    }
+
+    /**
+     * @dev whether the position is ABOVE the liquidation threshold — not whether it has
+     * borrowing capacity left. Those were the same question while the threshold equalled
+     * the LTV (defect 7); they are not any more.
+     *
+     * Borrow capacity is userMaxBorrowValueUSD, which borrow() and withdraw() check
+     * directly. This function's only caller is Position._update, the transfer gate, and
+     * it wants liquidatable semantics: a position that cannot be seized has no liquidator
+     * to race, so it should be transferable even at its borrow cap.
+     */
     function isPositionHealthy(uint256 positionId) public view returns (bool) {
-        return userBorrowedAmountUSD(positionId) <= userMaxBorrowValueUSD(positionId);
+        return healthFactor(positionId) >= WAD;
     }
 
     /**
@@ -686,6 +897,16 @@ contract Desultory is Ownable {
 
         uint256 price18 = uint256(price) * (10 ** (18 - collat.feedDecimals));
         return (amount * price18) / (10 ** collat.tokenDecimals);
+    }
+
+    /// @dev inverse of getValueUSD: how many token units a USD amount buys. Rounds DOWN.
+    function _usdToTokenAmount(address token, uint256 usdAmount) private view returns (uint256) {
+        Collateral memory collat = __tokenInfos[token];
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(collat.priceFeed);
+        (, int256 price,,,) = priceFeed.staleCheckLatestRoundData();
+
+        uint256 price18 = uint256(price) * (10 ** (18 - collat.feedDecimals));
+        return (usdAmount * (10 ** collat.tokenDecimals)) / price18;
     }
 
     /**
@@ -805,6 +1026,10 @@ contract Desultory is Ownable {
         return __tokenInfos[token].priceFeed;
     }
 
+    function getTokenInfo(address token) external view returns (Collateral memory) {
+        return __tokenInfos[token];
+    }
+
     ///////////////////////
     // Private Functions
     ///////////////////////
@@ -857,6 +1082,21 @@ contract Desultory is Ownable {
     }
 
     /**
+     * @dev accrue every pool plus DUSD.
+     *
+     * A liquidation reads the health factor, which sums ALL collateral and ALL debt.
+     * Accruing only the two assets named in the call would evaluate the rest at whatever
+     * index they were left at — defect 6, half-fixed. The loop is the same shape
+     * userBorrowedAmountUSD already runs on every health check.
+     */
+    function _accrueAll() private {
+        for (uint256 i = 0; i < __supportedTokensCount; i++) {
+            accrue(__tokenList[i]);
+        }
+        accrueDusd();
+    }
+
+    /**
      * @dev scaled-amount helpers. Rounding always favors the pool:
      * deposits round down (scaled credit), debts round up (owed amount).
      */
@@ -876,53 +1116,4 @@ contract Desultory is Ownable {
         return (scaled * index + WAD - 1) / WAD;
     }
 
-    /**
-     * @dev PENDING REDESIGN — mechanically ported only. Clears the position's
-     * debt bookkeeping and seizes 90% of the chosen collateral.
-     */
-    function settleDebtSeizeCollateral(uint256 position, address tokenToRepay, address tokenToLiquidate)
-        private
-        returns (uint256 collateralToTransfer)
-    {
-        Pool storage debtPool = __pools[tokenToRepay];
-        debtPool.totalScaledBorrows -= __scaledBorrows[position][tokenToRepay];
-        __scaledBorrows[position][tokenToRepay] = 0;
-
-        Pool storage collateralPool = __pools[tokenToLiquidate];
-        uint256 scaledCollateral = __scaledDeposits[position][tokenToLiquidate];
-        uint256 scaledSeized = scaledCollateral * (100 - __liquidationPenalty) / 100;
-        collateralToTransfer = __fromScaledDown(scaledSeized, collateralPool.liquidityIndex);
-
-        __scaledDeposits[position][tokenToLiquidate] = scaledCollateral - scaledSeized;
-        collateralPool.totalScaledDeposits -= scaledSeized;
-    }
-
-    /**
-     * @dev PENDING REDESIGN — mechanically ported only (the proportion math
-     * still zero-rounds for any collateral < 100% of the total).
-     */
-    function processCollateralLiquidation(
-        uint256 position,
-        address[] memory collateralTokens,
-        uint256 totalCollateralUSD,
-        uint256 liquidationValueUSD,
-        address liquidator
-    ) private {
-        for (uint256 i = 0; i < collateralTokens.length; i++) {
-            address collateralToken = collateralTokens[i];
-            Pool storage pool = __pools[collateralToken];
-            uint256 collateralAmount = getPositionCollateralForToken(position, collateralToken);
-
-            uint256 proportion = getValueUSD(collateralToken, collateralAmount) / totalCollateralUSD;
-            uint256 amountToLiquidate = (liquidationValueUSD * proportion)
-                / getValueUSD(collateralToken, 10 ** __tokenInfos[collateralToken].tokenDecimals);
-
-            uint256 scaledOut = __toScaledUp(amountToLiquidate, pool.liquidityIndex);
-            __scaledDeposits[position][collateralToken] -= scaledOut;
-            pool.totalScaledDeposits -= scaledOut;
-            IERC20(collateralToken).safeTransfer(liquidator, amountToLiquidate);
-
-            emit AssetLiquidation(msg.sender, position, collateralToken, amountToLiquidate);
-        }
-    }
 }

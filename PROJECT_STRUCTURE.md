@@ -21,16 +21,17 @@ Desultory_Lending/
 │   │   ├── Interest-Rate-Model.md  # 4-bracket kinked borrow curve, per-token multiplier
 │   │   ├── Positions.md        # NFT-as-position semantics, authorization, transfer health gate
 │   │   ├── Oracles.md          # Chainlink wrapper, staleness window, decimal normalization
-│   │   ├── Liquidations.md     # Documents the engine's defects; the module is broken
+│   │   ├── Liquidations.md     # The single-entry-point liquidation engine: health factor, close factor, bonus, clamp-and-count
 │   │   └── Cross-Chain.md      # DUSD-only remote borrowing over LayerZero V2; DUSD debt accounting
 │   ├── Decisions/              # MAINTAINED: numbered ADRs, superseded rather than edited
 │   │   ├── Decisions.md        # Zone index and status conventions
 │   │   ├── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
-│   │   ├── 0002-internal-consistency-invariants.md  # ADR: fuzz internal consistency, not solvency
-│   │   └── 0003-dusd-only-cross-chain-borrowing.md  # ADR: only DUSD crosses chains; one home chain per position
+│   │   ├── 0002-internal-consistency-invariants.md  # ADR: fuzz internal consistency, not solvency (superseded-by 0004 on the solvency point)
+│   │   ├── 0003-dusd-only-cross-chain-borrowing.md  # ADR: only DUSD crosses chains; one home chain per position
+│   │   └── 0004-liquidation-engine.md  # ADR: single-entry-point liquidation, clamp-and-count bad debt
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
-│   │   ├── Invariants.md       # The eight fuzzing invariants in prose, and what they found
+│   │   ├── Invariants.md       # The eleven fuzzing invariants in prose, and what they found
 │   │   └── 2026-06-10-project-assessment.md  # State-of-the-project audit
 │   └── Notes/                  # NOT maintained: research and scratch thinking
 │       ├── Notes.md            # Zone index
@@ -55,9 +56,11 @@ Desultory_Lending/
         │   ├── governance/
         │   │   └── VoteToken.sol # Bare LayerZero OFT; governance not implemented
         │   └── libraries/
-        │       └── OracleLib.sol # Chainlink price feed wrapper with staleness check
+        │       ├── OracleLib.sol       # Chainlink price feed wrapper with staleness check
+        │       └── LiquidationMath.sol # Storage-free liquidation arithmetic: health factor, close factor, seize/repay conversion, bonus split
         └── test/
-            ├── Desultory.t.sol # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, ownership, DUSD debt
+            ├── Desultory.t.sol      # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, health factor, ownership, DUSD debt
+            ├── LiquidationMath.t.sol # Unit + fuzz tests for the liquidation math library
             ├── DUSD.t.sol      # DUSD unit tests (minter gating, OFT wiring)
             ├── Position.t.sol  # Position NFT unit tests (mint auth, health-gated transfers)
             ├── crosschain/     # Two-chain tests on LayerZero's TestHelperOz5
@@ -66,8 +69,8 @@ Desultory_Lending/
             ├── recon/          # Chimera stateful fuzzing harness (Medusa + Echidna)
             │   ├── Setup.sol           # Deploys the system as Deploy.s.sol does, plus 3 actors
             │   ├── BeforeAfter.sol     # Per-token state snapshots around every call
-            │   ├── Properties.sol      # The eight internal-consistency invariants
-            │   ├── TargetFunctions.sol # Clamped call surface; no liquidation targets
+            │   ├── Properties.sol      # The eleven internal-consistency invariants
+            │   ├── TargetFunctions.sol # Clamped call surface incl. liquidate; liquidator actor never opens a position
             │   ├── CryticTester.sol    # Fuzzer entrypoint
             │   ├── CryticToFoundry.sol # Replays counterexamples as Foundry tests
             │   └── AccrualLeak.t.sol   # Regression test for the accrual leak the fuzzer found

@@ -13,9 +13,10 @@ import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
  * Chimera's `between`, which wraps by modulo and therefore never reverts —
  * a reverting clamp wastes the call.
  *
- * Liquidation entry points are deliberately absent. They are not excluded by
- * config; they are simply never written, so there is nothing to accidentally
- * re-enable while that engine is broken.
+ * Liquidation entry points are present (`desultory_liquidate`, below) and are on the
+ * fuzzed call surface: the engine is real and this harness targets it, including the
+ * same-asset case (debtAsset == collateralAsset), which is legal in production and not
+ * excluded here.
  */
 abstract contract TargetFunctions is BaseTargetFunctions, Properties {
     uint256 internal constant MAX_WARP = 30 days;
@@ -179,6 +180,67 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         ghostDusdBurned += amount;
     }
 
+    function desultory_liquidate(uint8 positionSeed, uint8 debtSeed, uint8 collatSeed, uint256 amount)
+        public
+        updateGhosts
+    {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+
+        // only drive the path the engine is specified for; a healthy position reverting is
+        // correct behaviour, not a finding, and would just waste the call
+        precondition(desultory.healthFactor(positionId) < 1e18);
+
+        MockERC20 debtToken = _getToken(debtSeed);
+        MockERC20 collatToken = _getToken(collatSeed);
+
+        uint256 debt = desultory.getPositionBorrowForToken(positionId, address(debtToken));
+        precondition(debt > 0);
+        precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
+
+        amount = between(amount, 1, debt);
+
+        uint256 debtSlot = _tokenSlot(debtSeed);
+        uint256 collatSlot = _tokenSlot(collatSeed);
+
+        // debtSeed and collatSeed are independent, so they can select the same token, and
+        // liquidate() places no restriction on debtAsset == collateralAsset — same-asset
+        // liquidation is a legal, real production path and must be exercised, not dodged.
+        // When the slots coincide, a single call pays debt tokens IN and seizes collateral
+        // OUT of the very same balance, so the balance can move in either net direction
+        // depending on repayAmount vs. the liquidator's cut of the seizure. Taking two
+        // independent unsigned "after - before" legs (one assuming the balance only rises,
+        // one assuming it only falls) underflows whichever leg guessed wrong. Snapshot the
+        // single shared balance once instead and record one signed net delta, so the ghosts
+        // record whatever actually happened rather than an assumed direction — this still
+        // reconciles with property_tokenConservation, which only requires that every call's
+        // contribution to (paidIn - paidOut) match that call's actual balance change.
+        if (debtSlot == collatSlot) {
+            uint256 before = debtToken.balanceOf(address(desultory));
+
+            vm.prank(liquidator);
+            desultory.liquidate(positionId, address(debtToken), address(collatToken), amount);
+
+            uint256 afterBal = debtToken.balanceOf(address(desultory));
+            if (afterBal >= before) {
+                ghostPaidIn[debtSlot] += afterBal - before;
+            } else {
+                ghostPaidOut[debtSlot] += before - afterBal;
+            }
+        } else {
+            uint256 paidBefore = debtToken.balanceOf(address(desultory));
+            uint256 seizedBefore = collatToken.balanceOf(address(desultory));
+
+            vm.prank(liquidator);
+            desultory.liquidate(positionId, address(debtToken), address(collatToken), amount);
+
+            // ghosts track what actually moved, not what was requested: the call clamps to the
+            // close factor and to collateral held, so the two can differ
+            ghostPaidIn[debtSlot] += debtToken.balanceOf(address(desultory)) - paidBefore;
+            ghostPaidOut[collatSlot] += seizedBefore - collatToken.balanceOf(address(desultory));
+        }
+    }
+
     function warp(uint32 secs) public updateGhosts {
         uint256 jump = between(uint256(secs), 1, MAX_WARP);
         vm.warp(block.timestamp + jump);
@@ -186,8 +248,10 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
 
     /// @dev price movement is wide on purpose. Every invariant is an
     /// internal-consistency property, so they survive the protocol going
-    /// economically underwater — which it will, since nothing can liquidate.
-    /// Bad debt reached this way is expected, not a finding.
+    /// economically underwater — which it can, since loss allocation (socializing
+    /// bad debt, an insurance fund, etc.) is deliberately out of scope even though
+    /// liquidation itself now runs. Bad debt reached this way is expected, not a
+    /// finding.
     function oracle_setPrice(uint8 tokenSeed, uint256 priceSeed) public updateGhosts {
         MockV3Aggregator feed = _getFeed(tokenSeed);
         int256 initial = tokenSeed % 2 == 0 ? WETH_INITIAL_PRICE : USDC_INITIAL_PRICE;
