@@ -31,6 +31,7 @@ abstract contract Setup is BaseSetup {
     MockV3Aggregator internal usdcFeed;
 
     address[3] internal actors;
+    address internal liquidator;
 
     uint256[] internal positionIds;
     address[2] internal tokens;
@@ -50,30 +51,6 @@ abstract contract Setup is BaseSetup {
 
         tokens = [address(weth), address(usdc)];
 
-        address[] memory tokenAddresses = new address[](2);
-        tokenAddresses[0] = address(weth);
-        tokenAddresses[1] = address(usdc);
-
-        address[] memory priceFeeds = new address[](2);
-        priceFeeds[0] = address(wethFeed);
-        priceFeeds[1] = address(usdcFeed);
-
-        uint8[] memory feedDecimals = new uint8[](2);
-        feedDecimals[0] = 18;
-        feedDecimals[1] = 8;
-
-        uint8[] memory tokenDecimals = new uint8[](2);
-        tokenDecimals[0] = 18;
-        tokenDecimals[1] = 18;
-
-        uint8[] memory ltvs = new uint8[](2);
-        ltvs[0] = 70;
-        ltvs[1] = 85;
-
-        uint16[] memory rates = new uint16[](2);
-        rates[0] = 400;
-        rates[1] = 200;
-
         position = new Position("Desultor", "DST");
 
         // DUSD is an OFT, so it needs a live endpoint at construction. The harness
@@ -81,9 +58,29 @@ abstract contract Setup is BaseSetup {
         lzEndpoint = new EndpointV2Mock(1, address(this));
         dusd = new DUSD("DesultoryUSD", "DUSD", address(lzEndpoint), address(this));
 
-        desultory = new Desultory(
-            tokenAddresses, priceFeeds, feedDecimals, tokenDecimals, ltvs, rates, address(position), address(dusd)
-        );
+        Desultory.TokenConfig[] memory configs = new Desultory.TokenConfig[](2);
+        configs[0] = Desultory.TokenConfig({
+            token: address(weth),
+            priceFeed: address(wethFeed),
+            feedDecimals: 18,
+            tokenDecimals: 18,
+            ltvRatio: 70,
+            liquidationThreshold: 75,
+            liquidationBonusBps: 1_000,
+            borrowRate: 400
+        });
+        configs[1] = Desultory.TokenConfig({
+            token: address(usdc),
+            priceFeed: address(usdcFeed),
+            feedDecimals: 8,
+            tokenDecimals: 18,
+            ltvRatio: 85,
+            liquidationThreshold: 90,
+            liquidationBonusBps: 500,
+            borrowRate: 200
+        });
+
+        desultory = new Desultory(configs, address(position), address(dusd));
 
         // without this every DUSD borrow reverts and the DUSD targets do nothing
         dusd.setMinter(address(desultory), true);
@@ -103,6 +100,17 @@ abstract contract Setup is BaseSetup {
             vm.prank(actors[i]);
             usdc.approve(address(desultory), type(uint256).max);
         }
+
+        // a fourth actor that never opens a position: it only ever liquidates. Keeping it out
+        // of `actors` means no target function will make it a borrower.
+        liquidator = address(0x11C0);
+        weth.mint(liquidator, ACTOR_FUNDING);
+        usdc.mint(liquidator, ACTOR_FUNDING);
+
+        vm.prank(liquidator);
+        weth.approve(address(desultory), type(uint256).max);
+        vm.prank(liquidator);
+        usdc.approve(address(desultory), type(uint256).max);
     }
 
     function _getActor(uint8 seed) internal view returns (address) {

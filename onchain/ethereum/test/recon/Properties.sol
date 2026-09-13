@@ -6,13 +6,16 @@ import {Asserts} from "@chimera/Asserts.sol";
 import {BeforeAfter} from "./BeforeAfter.sol";
 import {Desultory} from "../../src/Desultory.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {LiquidationMath} from "../../src/libraries/LiquidationMath.sol";
 
 /**
  * @dev internal-consistency invariants only. Economic solvency is deliberately
- * NOT asserted: with no working liquidation engine, a large enough price drop
- * makes the protocol genuinely insolvent, so asserting solvency would be
- * asserting a property the system does not have. Every property here survives
- * bad debt, which is what lets the fuzzer move prices as violently as it likes.
+ * NOT asserted: the liquidation engine is real and on the fuzzed call surface, but
+ * loss allocation (socializing bad debt across lenders, an insurance fund, etc.) is
+ * deliberately out of scope, so a large enough price drop can still leave the
+ * protocol genuinely insolvent — asserting solvency would be asserting a property
+ * the system does not have. Every property here survives bad debt, which is what
+ * lets the fuzzer move prices as violently as it likes.
  *
  * See docs/Audit/Invariants.md and docs/Decisions/0002-internal-consistency-invariants.md
  */
@@ -26,6 +29,8 @@ abstract contract Properties is BeforeAfter, Asserts {
 
     uint256 internal ghostDusdMinted;
     uint256 internal ghostDusdBurned;
+
+    uint256 internal ghostBadDebtSeen;
 
     /// @dev per-position scaled balances must sum to the pool totals, exactly.
     /// These are raw stored integers and no rounding happens in the summation,
@@ -112,5 +117,33 @@ abstract contract Properties is BeforeAfter, Asserts {
             sum += desultory.getScaledDusdDebt(positionIds[p]);
         }
         eq(sum, desultory.totalScaledDusdDebt(), "scaled DUSD debt must sum to the total");
+    }
+
+    /// @dev bad debt is a monotone record of recognized loss; nothing decrements it
+    function property_badDebtNeverDecreases() public {
+        uint256 current = desultory.totalBadDebtUSD();
+        gte(current, ghostBadDebtSeen, "totalBadDebtUSD decreased");
+        ghostBadDebtSeen = current;
+    }
+
+    /// @dev a position at or above the liquidation threshold must be unseizable
+    function property_healthyPositionsAreNotLiquidatable() public {
+        for (uint256 p = 0; p < positionIds.length; p++) {
+            if (desultory.healthFactor(positionIds[p]) >= WAD) {
+                t(desultory.isPositionHealthy(positionIds[p]), "healthy position reported as liquidatable");
+            }
+        }
+    }
+
+    /// @dev the property that keeps liquidation worth calling, asserted against the pure
+    /// function rather than through a whole liquidation
+    function property_liquidatorIsNeverWorseOff() public {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint16 bonusBps = desultory.getTokenInfo(tokens[i]).liquidationBonusBps;
+            uint256 base = 1_000e18;
+            uint256 seize = LiquidationMath.seizeFromRepay(base, bonusBps);
+            (, uint256 toLiquidator) = LiquidationMath.splitBonus(base, seize, 3_000);
+            gte(toLiquidator, base, "liquidator would receive less than they paid");
+        }
     }
 }

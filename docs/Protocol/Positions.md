@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 5db9f71
+verified-against: uncommitted (ft/liquidations — bump to the commit sha)
 ---
 
 # Positions
@@ -55,11 +55,18 @@ owner watching their position go underwater could sell it to someone who has not
 noticed, and the liquidation would land on the buyer. It also prevents transfers
 racing an in-flight liquidation.
 
-The cost is that a position sitting just above the liquidation line is untradeable
-in exactly the moment its owner most wants to sell it. That is a real limitation,
-accepted deliberately. Revisit it when the liquidation engine is redesigned — a
-liquidation *threshold* separate from LTV would open a band where a position is
-unhealthy-but-not-yet-liquidatable, and transfers could arguably be allowed there.
+`isPositionHealthy` is pointed at the same liquidatable semantics as the liquidation
+engine (`healthFactor(positionId) >= WAD`), not at the LTV cap — see [[Liquidations]]
+for the threshold/LTV split. That means the gate only blocks a transfer once the
+position is actually seizable. Between the LTV cap and the liquidation threshold
+there is a band where a position is over-borrowed-relative-to-LTV but not yet
+liquidatable, and **transfers in that band are allowed**. This is deliberate, not
+an oversight: a position that cannot yet be seized has no liquidator racing it, so
+there is no hot potato to hand off and no race to protect against. The gate exists
+to stop a liquidatable position from being sold out from under a liquidator's
+in-flight transaction — a position that is merely over its LTV cap poses no such
+risk. See [[0004-liquidation-engine]] for the ADR that records this as a deliberate
+redefinition of `isPositionHealthy`, not a side effect.
 
 ## Wiring
 

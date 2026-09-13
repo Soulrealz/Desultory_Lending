@@ -1,6 +1,6 @@
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 
 import {Desultory} from "../src/Desultory.sol";
 import {Position} from "../src/PositionNFT.sol";
@@ -407,6 +407,59 @@ contract DesultoryTest is Test {
     }
 
     ///////////////////////
+    // Health Factor Tests
+    ///////////////////////
+
+    function testHealthFactorIsMaxWithNoDebt() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        assertEq(desultory.healthFactor(1), type(uint256).max, "no debt means no risk");
+    }
+
+    function testHealthFactorUsesThresholdNotLtv() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18); // 1 WETH @ 3000
+
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18); // exactly the LTV cap: 3000 * 70%
+
+        // capacity is exhausted, but the seize line is 3000 * 75% = 2250
+        assertEq(desultory.userMaxBorrowValueUSD(1), 2_100e18, "at the borrow cap");
+        assertEq(desultory.healthFactor(1), (uint256(2_250e18) * 1e18) / 2_100e18, "threshold-weighted");
+        assertTrue(desultory.isPositionHealthy(1), "maxed out is not the same as liquidatable");
+    }
+
+    function testPositionBecomesLiquidatableOnlyBelowThreshold() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        // drop WETH to 2800: seize line is 2800 * 75% = 2100, exactly the debt -> HF == 1
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2800e18);
+        assertEq(desultory.healthFactor(1), 1e18, "at the line");
+        assertTrue(desultory.isPositionHealthy(1), "at the line is not past it");
+
+        // one more dollar down and it is liquidatable
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2799e18);
+        assertLt(desultory.healthFactor(1), 1e18);
+        assertFalse(desultory.isPositionHealthy(1), "below the line is liquidatable");
+    }
+
+    /// @dev a position between its LTV cap and its liquidation threshold must still be
+    /// transferable: it cannot be seized, so there is no liquidator to race.
+    function testPositionBetweenLtvAndThresholdIsTransferable() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        vm.prank(alice);
+        position.transferFrom(alice, bob, 1);
+        assertEq(position.ownerOf(1), bob);
+    }
+
+    ///////////////////////
     // Fuzz Tests
     ///////////////////////
 
@@ -649,5 +702,328 @@ contract DesultoryTest is Test {
         desultory.repayDUSD(1, 1_000e18);
 
         assertEq(desultory.getPositionDusdDebt(1), 0);
+    }
+
+    ///////////////////////
+    // Risk Parameter Tests
+    ///////////////////////
+
+    function testRiskParametersAreStored() public view {
+        Desultory.Collateral memory w = desultory.getTokenInfo(weth);
+        assertEq(w.ltvRatio, 70, "weth ltv");
+        assertEq(w.liquidationThreshold, 75, "weth threshold");
+        assertEq(w.liquidationBonusBps, 1_000, "weth bonus");
+
+        Desultory.Collateral memory u = desultory.getTokenInfo(usdc);
+        assertEq(u.ltvRatio, 85, "usdc ltv");
+        assertEq(u.liquidationThreshold, 90, "usdc threshold");
+        assertEq(u.liquidationBonusBps, 500, "usdc bonus");
+    }
+
+    function testConstructorRejectsThresholdBelowLtv() public {
+        Desultory.TokenConfig[] memory configs = new Desultory.TokenConfig[](1);
+        configs[0] = Desultory.TokenConfig({
+            token: weth,
+            priceFeed: desultory.getPriceFeedForToken(weth),
+            feedDecimals: 18,
+            tokenDecimals: 18,
+            ltvRatio: 80,
+            liquidationThreshold: 75, // below ltv — must revert
+            liquidationBonusBps: 1_000,
+            borrowRate: 400
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__InvalidRiskParams.selector, weth));
+        new Desultory(configs, address(position), address(dusd));
+    }
+
+    function testConstructorRejectsExcessiveBonus() public {
+        Desultory.TokenConfig[] memory configs = new Desultory.TokenConfig[](1);
+        configs[0] = Desultory.TokenConfig({
+            token: weth,
+            priceFeed: desultory.getPriceFeedForToken(weth),
+            feedDecimals: 18,
+            tokenDecimals: 18,
+            ltvRatio: 70,
+            liquidationThreshold: 75,
+            liquidationBonusBps: 2_001, // above MAX_BONUS_BPS
+            borrowRate: 400
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__InvalidRiskParams.selector, weth));
+        new Desultory(configs, address(position), address(dusd));
+    }
+
+    ///////////////////////
+    // Liquidation Tests
+    ///////////////////////
+
+    /// @dev puts position 1 under water: alice deposits 1 WETH, borrows to the LTV cap,
+    /// then WETH falls far enough to cross the 75% threshold.
+    function _makeLiquidatable() internal {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2500e18); // seize line 1875 < 2100
+        assertFalse(desultory.isPositionHealthy(1), "fixture must be liquidatable");
+    }
+
+    /// @dev bob needs DUSD to repay alice's DUSD debt; he borrows his own against WETH
+    function _fundBobWithDusd(uint256 amount) internal {
+        vm.prank(bob);
+        desultory.deposit(0, weth, 100e18);
+        vm.prank(bob);
+        desultory.borrowDUSD(2, amount);
+    }
+
+    function testHealthyPositionCannotBeLiquidated() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 1_000e18);
+
+        _fundBobWithDusd(1_000e18);
+
+        assertGe(desultory.healthFactor(1), 1e18, "fixture must be healthy");
+
+        vm.prank(bob);
+        vm.expectRevert(); // Desultory__NotLiquidatable; the HF it carries is read inside the call
+        desultory.liquidate(1, address(dusd), weth, 100e18);
+    }
+
+    function testLiquidationRepaysDebtAndSeizesCollateralWithBonus() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        uint256 repay = 500e18; // well under the 50% close factor of 2100
+        uint256 bobWethBefore = MockERC20(weth).balanceOf(bob);
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, repay);
+
+        // debt fell by exactly the repayment
+        assertEq(desultory.getPositionDusdDebt(1), 2_100e18 - repay, "debt retired");
+
+        // seizure is repay * 1.10 in USD, at 2500/WETH, minus the protocol's 30% of the bonus
+        uint256 seizeUSD = (repay * 11_000) / 10_000;          // 550 USD
+        uint256 seizeWeth = (seizeUSD * 1e18) / 2500e18;       // 0.22 WETH
+        uint256 baseWeth = (repay * 1e18) / 2500e18;           // 0.20 WETH
+        uint256 cut = ((seizeWeth - baseWeth) * 3_000) / 10_000;
+
+        // approximate, not exact: the contract derives `base` through repayFromSeize (which
+        // ceils) while this test derives it straight from the price, so the two can differ by
+        // a wei or two. The bonus direction and the split are what matter here.
+        assertApproxEqAbs(MockERC20(weth).balanceOf(bob) - bobWethBefore, seizeWeth - cut, 1e12, "liquidator payout");
+        assertApproxEqAbs(desultory.getPoolInfo(weth).reserves, cut, 1e12, "protocol cut to reserves");
+        assertApproxEqAbs(desultory.getPositionCollateralForToken(1, weth), 1e18 - seizeWeth, 2, "collateral seized");
+    }
+
+    function testLiquidationClampsToCloseFactor() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(3_000e18);
+
+        // HF here is 1875/2100 = 0.892 -> below 0.95, so a FULL close is allowed
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 5_000e18); // asks for more than the debt
+
+        assertEq(desultory.getPositionDusdDebt(1), 0, "deep band allows a full close");
+    }
+
+    function testNormalBandAllowsOnlyHalf() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        // 2800 -> seize line 2100, HF == 1.0; nudge to 2790 -> HF 0.996, normal band
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2790e18);
+        assertLt(desultory.healthFactor(1), 1e18);
+        assertGt(desultory.healthFactor(1), 0.95e18);
+
+        _fundBobWithDusd(3_000e18);
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 5_000e18);
+
+        assertEq(desultory.getPositionDusdDebt(1), 1_050e18, "only half may be closed");
+    }
+
+    function testLiquidatorWithoutApprovalReverts() public {
+        // token debt, not DUSD: alice borrows usdc against weth
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(bob);
+        desultory.deposit(0, usdc, 50_000e18); // supply the pool
+        vm.prank(alice);
+        desultory.borrow(1, usdc, 2_000e18);
+
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2500e18);
+        assertFalse(desultory.isPositionHealthy(1));
+
+        address carol = makeAddr("carol");
+        MockERC20(usdc).mint(carol, 10_000e18); // has the balance, never approved
+
+        vm.prank(carol);
+        vm.expectRevert();
+        desultory.liquidate(1, usdc, weth, 500e18);
+
+        // and nothing moved: the old engine would have paid him from protocol funds
+        assertEq(desultory.getPositionBorrowForToken(1, usdc), 2_000e18, "debt untouched");
+        assertEq(MockERC20(weth).balanceOf(carol), 0, "no collateral leaked");
+    }
+
+    function testLiquidationAccruesBeforeEvaluating() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(3_000e18);
+
+        vm.warp(block.timestamp + 365 days);
+        // refresh the feed's timestamp so the health check below doesn't revert on
+        // staleness (OracleLib.TIMEOUT is 3 hours); the price itself is unchanged.
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2500e18);
+
+        uint256 staleDebt = 2_100e18;
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 100e18);
+
+        // the 2% stability fee must have been charged before the repayment was applied
+        assertGt(desultory.getPositionDusdDebt(1) + 100e18, staleDebt, "accrual ran first");
+    }
+
+    function testLiquidationEmitsTheEvent() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        vm.recordLogs();
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 500e18);
+
+        // one Liquidation event, from Desultory
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == Desultory.Liquidation.selector) {
+                found = true;
+            }
+        }
+        assertTrue(found, "Liquidation event must be emitted");
+    }
+
+    /// @dev collateral crashes far enough that the full close factor cannot be covered
+    function testSeizureClampsToCollateralHeldAndBackSolvesRepayment() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        // 1 WETH now worth 1000; debt is 2100 -> collateral cannot cover it
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(1000e18);
+
+        _fundBobWithDusd(3_000e18);
+
+        uint256 bobDusdBefore = dusd.balanceOf(bob);
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 2_100e18); // ask for everything
+
+        // seizure capped at the 1 WETH actually held
+        assertEq(desultory.getPositionCollateralForToken(1, weth), 0, "all collateral taken");
+
+        // and the repayment was scaled back to match: at 1000/WETH with a 10% bonus,
+        // 1 WETH of seizure corresponds to ~909 DUSD of debt, not 2100
+        uint256 paid = bobDusdBefore - dusd.balanceOf(bob);
+        assertLt(paid, 1_000e18, "repayment back-solved from the capped seizure");
+        assertGt(paid, 900e18, "but not arbitrarily small");
+        assertEq(desultory.getPositionDusdDebt(1), 2_100e18 - paid, "debt reduced by exactly what was paid");
+    }
+
+    /// @dev regression for the bug the Chimera harness found once liquidation entered its
+    /// target surface: _seizeCollateral used to move a pool's totalScaledDeposits with no
+    /// getAvailableLiquidity-style bound, unlike withdraw()/borrow(). If the collateral
+    /// asset being seized is also heavily borrowed by a DIFFERENT position, an unbounded
+    /// seizure can push that pool's debt above its deposits. liquidate() now caps the
+    /// seizure at min(collateral held, pool's available liquidity) and back-solves the
+    /// repayment from whichever is smaller, same as the existing collateral-held clamp.
+    function testSeizureIsBoundedByAvailableLiquidity() public {
+        MockERC20(usdc).mint(alice, 200_000e18);
+
+        // alice: 200k USDC collateral, will borrow WETH against it
+        vm.prank(alice);
+        desultory.deposit(0, usdc, 200_000e18);
+
+        // bob: 1000 WETH collateral, funds his own borrow capacity first...
+        vm.prank(bob);
+        desultory.deposit(0, weth, 1000e18);
+
+        // ...then alice borrows WETH (needs bob's WETH liquidity in the pool)
+        vm.prank(alice);
+        desultory.borrow(1, weth, 50e18);
+
+        // bob then borrows almost all of the USDC pool alice supplied, leaving the USDC
+        // pool with only 10k of uncommitted (available) liquidity
+        vm.prank(bob);
+        desultory.borrow(2, usdc, 190_000e18);
+
+        uint256 availableBefore = desultory.getAvailableLiquidity(usdc);
+        assertEq(availableBefore, 10_000e18, "USDC pool almost fully lent out");
+
+        // crash WETH's price UP so alice's WETH debt overwhelms her USDC collateral
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(30_000e18);
+        assertLt(desultory.healthFactor(1), 1e18, "alice must be liquidatable");
+
+        address liquidatorAddr = makeAddr("seizureLiquidator");
+        MockERC20(weth).mint(liquidatorAddr, 1_000e18);
+        vm.prank(liquidatorAddr);
+        MockERC20(weth).approve(address(desultory), type(uint256).max);
+
+        // ask to repay everything the close factor would allow; the collateral side
+        // alone (200k USDC) can't be the binding constraint, the pool's cash can
+        vm.prank(liquidatorAddr);
+        desultory.liquidate(1, weth, usdc, 50e18);
+
+        // it must have partially filled rather than reverting
+        assertGt(desultory.getPositionBorrowForToken(1, weth), 0, "WETH debt only partially repaid");
+
+        // the pool must still satisfy deposits >= debt: the seizure could not have taken
+        // more than the pool's available liquidity
+        Desultory.Pool memory usdcPool = desultory.getPoolInfo(usdc);
+        uint256 usdcDeposits = usdcPool.totalScaledDeposits * usdcPool.liquidityIndex / 1e18;
+        uint256 usdcDebt = (usdcPool.totalScaledBorrows * usdcPool.borrowIndex + 1e18 - 1) / 1e18;
+        assertGe(usdcDeposits, usdcDebt, "USDC pool debt must not exceed deposits");
+    }
+
+    function testBadDebtIsRecordedWhenCollateralIsExhausted() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 2_100e18);
+
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(1000e18);
+        _fundBobWithDusd(3_000e18);
+
+        assertEq(desultory.totalBadDebtUSD(), 0, "clean to start");
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 2_100e18);
+
+        assertEq(desultory.getPositionCollateralForToken(1, weth), 0, "no collateral left");
+        assertGt(desultory.getPositionDusdDebt(1), 0, "debt remains");
+        assertEq(
+            desultory.totalBadDebtUSD(),
+            desultory.userBorrowedAmountUSD(1),
+            "the whole remaining debt is recognized as bad"
+        );
+    }
+
+    function testNoBadDebtWhenCollateralRemains() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 500e18);
+
+        assertGt(desultory.getPositionCollateralForToken(1, weth), 0);
+        assertEq(desultory.totalBadDebtUSD(), 0, "collateral remains, nothing is written off");
     }
 }

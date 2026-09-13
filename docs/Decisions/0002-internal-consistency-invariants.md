@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-09-12
+superseded-by: 0004-liquidation-engine
 ---
 
 # 0002 — Fuzz for internal consistency, not economic solvency

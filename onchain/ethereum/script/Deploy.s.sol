@@ -11,12 +11,11 @@ import { Adapter } from "../src/crosschain/Adapter.sol";
 
 contract Deploy is Script
 {
+    Desultory.TokenConfig[] configs;
+
+    // both kept purely for the getAddrI / getFeedI accessors the tests use
     address[] tokenAddresses;
     address[] priceFeedAddresses;
-    uint8[] feedDecimals;
-    uint8[] tokenDecimals;
-    uint8[] ltvRatios;
-    uint16[] rates;
 
     Desultory desultory;
     Position position;
@@ -30,12 +29,33 @@ contract Deploy is Script
         (address wethF, address usdcF) = config.feeds();
         (address wethT, address usdcT) = config.tokens();
 
-        priceFeedAddresses = [wethF, usdcF];
         tokenAddresses = [wethT, usdcT];
-        feedDecimals = [18, 8];
-        tokenDecimals = [18, 18];
-        ltvRatios = [70, 85];
-        rates = [400, 200];
+        priceFeedAddresses = [wethF, usdcF];
+
+        configs.push(
+            Desultory.TokenConfig({
+                token: wethT,
+                priceFeed: wethF,
+                feedDecimals: 18,
+                tokenDecimals: 18,
+                ltvRatio: 70,
+                liquidationThreshold: 75,
+                liquidationBonusBps: 1_000,
+                borrowRate: 400
+            })
+        );
+        configs.push(
+            Desultory.TokenConfig({
+                token: usdcT,
+                priceFeed: usdcF,
+                feedDecimals: 8,
+                tokenDecimals: 18,
+                ltvRatio: 85,
+                liquidationThreshold: 90,
+                liquidationBonusBps: 500,
+                borrowRate: 200
+            })
+        );
 
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         // the account that actually performs the CREATEs below, and therefore the
@@ -45,9 +65,7 @@ contract Deploy is Script
 
         position = new Position("Desultor", "DST");
         dusd = new DUSD("DesultoryUSD", "DUSD", config.lz(), deployer);
-        desultory = new Desultory(
-            tokenAddresses, priceFeedAddresses, feedDecimals, tokenDecimals, ltvRatios, rates, address(position), address(dusd)
-        );
+        desultory = new Desultory(configs, address(position), address(dusd));
 
         dusd.setMinter(address(desultory), true);
 
@@ -69,5 +87,9 @@ contract Deploy is Script
     function getAddrI(uint256 index) external view returns (address)
     {
         return tokenAddresses[index];
+    }
+
+    function getFeedI(uint256 index) external view returns (address) {
+        return priceFeedAddresses[index];
     }
 }
