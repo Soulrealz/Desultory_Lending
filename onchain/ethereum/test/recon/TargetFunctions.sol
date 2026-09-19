@@ -181,6 +181,113 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         ghostDusdBurned += amount;
     }
 
+    /// @dev redemption. The redeemer burns DUSD and receives collateral, so the DUSD leg
+    /// is a burn (ghostDusdBurned) and the collateral leg is a transfer out (ghostPaidOut).
+    ///
+    /// The burned amount is read from the supply delta rather than from `amount`: _redeem
+    /// clamps to the position's debt AND to the capped collateral, so the requested figure
+    /// routinely overstates what was actually burned, and crediting it would break
+    /// property_dusdSupplyMatchesAuthorization on the first partial fill.
+    ///
+    /// The redeemer is not `liquidator` — liquidator is only ever funded with pool tokens
+    /// (see Setup.sol), never DUSD, so a precondition on its DUSD balance would always
+    /// fail and this target would be dead. DUSD only ever reaches a position owner, via
+    /// desultory_borrowDUSD, so the redeemer here is picked the same way
+    /// desultory_repayDUSD picks its payer: a position owner, selected by seed. Redeeming
+    /// against one's own position is legal and deliberately not excluded.
+    function desultory_redeem(uint8 redeemerSeed, uint8 positionSeed, uint8 collatSeed, uint256 amount)
+        public
+        updateGhosts
+    {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+
+        // only drive the path the engine is specified for; an unhealthy position reverting
+        // is correct behaviour, not a finding
+        precondition(desultory.healthFactor(positionId) >= 1e18);
+
+        uint256 debt = desultory.getPositionDusdDebt(positionId);
+        precondition(debt > 0);
+
+        MockERC20 collatToken = _getToken(collatSeed);
+        precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
+
+        address redeemer = position.ownerOf(_getPosition(redeemerSeed));
+        uint256 balance = dusd.balanceOf(redeemer);
+        precondition(balance > 0);
+
+        amount = between(amount, 1, debt < balance ? debt : balance);
+
+        uint256 slot = _tokenSlot(collatSeed);
+        uint256 redeemerCollatBefore = collatToken.balanceOf(redeemer);
+        uint256 supplyBefore = dusd.totalSupply();
+
+        vm.prank(redeemer);
+        desultory.redeem(positionId, address(collatToken), amount);
+
+        uint256 burned = supplyBefore - dusd.totalSupply();
+        uint256 received = collatToken.balanceOf(redeemer) - redeemerCollatBefore;
+
+        ghostPaidOut[slot] += received;
+        ghostDusdBurned += burned;
+
+        // The redeemer must never receive more USD of collateral than the DUSD they burned
+        // — that difference IS the redemption fee, and its sign is the whole economic
+        // guarantee. Asserted instead of "redemption never lowers the target's health
+        // factor": health factor is a function of the indices, and redeem() accrues
+        // internally, so a before/after comparison straddles an accrual boundary and
+        // attributes realized interest to the redemption. This invariant compares two
+        // figures produced by the same call, so no amount of elapsed time can perturb it.
+        // The health-factor property is covered by testRedeemImprovesTheTargetHealthFactor
+        // in test/Desultory.t.sol, where no time passes between the snapshot and the call.
+        gte(burned, desultory.getValueUSD(address(collatToken), received), "redeemer received more than they burned");
+    }
+
+    /// @dev the backstopped redemption path. Same ghost handling and same redeemer
+    /// selection as desultory_redeem — the reserve commit moves no tokens, so only the
+    /// collateral payout and the burn show up.
+    function desultory_redeemWithBackstop(uint8 redeemerSeed, uint8 positionSeed, uint8 collatSeed, uint256 amount)
+        public
+        updateGhosts
+    {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+
+        precondition(desultory.healthFactor(positionId) >= 1e18);
+
+        uint256 debt = desultory.getPositionDusdDebt(positionId);
+        precondition(debt > 0);
+
+        MockERC20 collatToken = _getToken(collatSeed);
+        precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
+
+        address redeemer = position.ownerOf(_getPosition(redeemerSeed));
+        uint256 balance = dusd.balanceOf(redeemer);
+        precondition(balance > 0);
+
+        amount = between(amount, 1, debt < balance ? debt : balance);
+
+        uint256 slot = _tokenSlot(collatSeed);
+        uint256 redeemerCollatBefore = collatToken.balanceOf(redeemer);
+        uint256 supplyBefore = dusd.totalSupply();
+
+        vm.prank(redeemer);
+        desultory.redeemWithBackstop(positionId, address(collatToken), amount);
+
+        uint256 burned = supplyBefore - dusd.totalSupply();
+        uint256 received = collatToken.balanceOf(redeemer) - redeemerCollatBefore;
+
+        // received is the redeemer's own balance delta, not the contract's: on the
+        // backstop path the fee stays in the contract (booked to reserves), so the
+        // contract's balance delta would overstate what the redeemer actually got. The
+        // redeemer's delta is what both ghostPaidOut and the assertion below are about,
+        // and on this path it is exactly what left the contract — the fee never leaves.
+        ghostPaidOut[slot] += received;
+        ghostDusdBurned += burned;
+
+        gte(burned, desultory.getValueUSD(address(collatToken), received), "redeemer received more than they burned");
+    }
+
     function desultory_liquidate(uint8 positionSeed, uint8 debtSeed, uint8 collatSeed, uint256 amount)
         public
         updateGhosts
