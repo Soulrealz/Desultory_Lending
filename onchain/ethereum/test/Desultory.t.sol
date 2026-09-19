@@ -1130,4 +1130,48 @@ contract DesultoryTest is Test {
         assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "WETH backstop starts empty");
         assertEq(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "USDC backstop starts empty");
     }
+
+    function testBackstopEntryPointInvertsTheBonusSplit() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        uint256 repay = 500e18; // well under the 50% close factor of 2100
+        uint256 bobWethBefore = MockERC20(weth).balanceOf(bob);
+
+        vm.prank(bob);
+        desultory.liquidateWithBackstop(1, address(dusd), weth, repay);
+
+        assertEq(desultory.getPositionDusdDebt(1), 2_100e18 - repay, "debt retired");
+
+        // same seizure as the ordinary path — the borrower gives up exactly as much —
+        // but the protocol keeps 70% of the bonus instead of 30%
+        uint256 seizeUSD = (repay * 11_000) / 10_000; // 550 USD
+        uint256 seizeWeth = (seizeUSD * 1e18) / 2500e18; // 0.22 WETH
+        uint256 baseWeth = (repay * 1e18) / 2500e18; // 0.20 WETH
+        uint256 cut = ((seizeWeth - baseWeth) * 7_000) / 10_000;
+
+        // approximate for the same reason the ordinary-path test is: the contract derives
+        // `base` through repayFromSeize (which ceils) while this derives it from the price
+        assertApproxEqAbs(MockERC20(weth).balanceOf(bob) - bobWethBefore, seizeWeth - cut, 1e12, "liquidator payout");
+        assertApproxEqAbs(desultory.getPoolInfo(weth).reserves, cut, 1e12, "protocol cut to reserves");
+        assertApproxEqAbs(desultory.getPositionCollateralForToken(1, weth), 1e18 - seizeWeth, 2, "collateral seized");
+
+        // the WETH pool was never short, so nothing should have been committed
+        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "no commit on a liquid pool");
+    }
+
+    function testLiquidatorStillProfitsOnTheBackstopPath() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        uint256 repay = 500e18;
+        uint256 bobWethBefore = MockERC20(weth).balanceOf(bob);
+
+        vm.prank(bob);
+        desultory.liquidateWithBackstop(1, address(dusd), weth, repay);
+
+        // 500 USD of DUSD debt burned buys strictly more than 500 USD of WETH at 2500
+        uint256 gained = MockERC20(weth).balanceOf(bob) - bobWethBefore;
+        assertGt(gained * 2500e18 / 1e18, repay, "liquidator must still clear a profit at 7000 bps");
+    }
 }

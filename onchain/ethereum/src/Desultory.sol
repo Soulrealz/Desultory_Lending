@@ -528,6 +528,37 @@ contract Desultory is Ownable, ReentrancyGuard {
         moreThanZero(repayAmount)
         isAllowedToken(collateralAsset)
     {
+        _liquidate(positionId, debtAsset, collateralAsset, repayAmount, false);
+    }
+
+    /**
+     * @dev liquidate against a pool that cannot spare the liquidity, funding the seizure
+     * from the protocol's own reserves.
+     *
+     * Identical to liquidate() in every respect but two: the seizure cap may draw on
+     * reserves converted to a protocol-owned deposit (see _commitBackstop), and the
+     * protocol keeps LIQ_BACKSTOP_SHARE of the bonus rather than LIQ_PROTOCOL_SHARE.
+     *
+     * A separate entry point rather than an automatic fallback inside liquidate(), so a
+     * liquidator that quoted its profit off the ordinary split is never silently paid less.
+     * Choosing this function is the consent.
+     */
+    function liquidateWithBackstop(uint256 positionId, address debtAsset, address collateralAsset, uint256 repayAmount)
+        external
+        nonReentrant
+        moreThanZero(repayAmount)
+        isAllowedToken(collateralAsset)
+    {
+        _liquidate(positionId, debtAsset, collateralAsset, repayAmount, true);
+    }
+
+    function _liquidate(
+        uint256 positionId,
+        address debtAsset,
+        address collateralAsset,
+        uint256 repayAmount,
+        bool useBackstop
+    ) private {
         if (debtAsset != address(__DUSD) && __tokenInfos[debtAsset].priceFeed == address(0)) {
             revert Desultory__TokenNotWhitelisted(debtAsset);
         }
@@ -598,8 +629,9 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
 
         uint256 baseAmount = LiquidationMath.repayFromSeize(seizeAmount, bonusBps);
-        (uint256 protocolCut, uint256 toLiquidator) =
-            LiquidationMath.splitBonus(baseAmount, seizeAmount, LIQ_PROTOCOL_SHARE);
+        (uint256 protocolCut, uint256 toLiquidator) = LiquidationMath.splitBonus(
+            baseAmount, seizeAmount, useBackstop ? LIQ_BACKSTOP_SHARE : LIQ_PROTOCOL_SHARE
+        );
 
         // --- effects, then an external call ---
         // _retireDebt itself performs an external call (DUSD burn, or safeTransferFrom for a
