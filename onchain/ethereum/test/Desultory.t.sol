@@ -1659,7 +1659,7 @@ contract DesultoryTest is Test {
 
         // both feeds must be refreshed after the warp or OracleLib's 3h timeout reverts
         MockV3Aggregator(deploy.getFeedI(1)).updateAnswer(100_000_000); // USDC, $1
-        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2000e18); // WETH, unchanged
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2000e18); // WETH, pinned at $2000 (deploy default is $3000)
 
         assertGe(desultory.healthFactor(1), 1e18, "alice must stay healthy");
 

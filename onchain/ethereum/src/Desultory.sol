@@ -1316,10 +1316,12 @@ contract Desultory is Ownable, ReentrancyGuard {
             }
         }
 
-        // DUSD is valued at $1. This is an assumption, not a fact: it holds only while
-        // the peg does, and the peg mechanism is not designed yet (project C2). If DUSD
-        // trades above $1, debt here is understated and positions are under-collateralized
-        // in real terms.
+        // DUSD is valued at $1, and that par convention is what redeem() enforces: below
+        // $1 - REDEMPTION_FEE_BPS, buying DUSD and redeeming it against a healthy position
+        // is profitable, which burns supply until the discount closes. So this is a
+        // mechanism now, not a bare assumption. The floor is one-sided, though — nothing
+        // caps DUSD ABOVE $1, the direction that understates debt here, and supply caps
+        // (project C2.2) are not built.
         totalUSD += getPositionDusdDebt(position);
 
         return totalUSD;

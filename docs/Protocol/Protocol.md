@@ -17,7 +17,8 @@ verified-against: <commit sha>
 - [[Interest-Rate-Model]] — the 4-bracket kinked borrow curve
 - [[Positions]] — the NFT *is* the position; ownership and transfer gating
 - [[Oracles]] — Chainlink wrapper, staleness, decimal normalization
-- [[Liquidations]] — **currently broken**; documents the defects, not a working design
+- [[Liquidations]] — the engine: health factor, close factor, bonus split, clamp-and-count bad debt, internal backstop
 - [[Cross-Chain]] — DUSD-only remote borrowing over LayerZero V2, and DUSD debt accounting
+- [[DUSD]] — the stablecoin's whole lifecycle: mint, repay, redemption, the stability fee, and the par convention
 
 Not yet written, pending its design session: governance.

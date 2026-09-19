@@ -80,7 +80,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   `pool.backstopScaledDeposits` (a SUBSET of `totalScaledDeposits`, not a position, so
   `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures, credit rounds
   down, reserves fall by the exact round-trip; no token moves, so custody holds by
-  construction. `releaseBackstop(token, amount)` (owner-only) is the mirror: accrues,
+  construction. **`_commitBackstop` has two callers**: `_liquidate` and `_redeem` — the
+  redemption path funds a cash-poor pool through exactly the same machinery, sized to the
+  collateral the redemption may remove. `releaseBackstop(token, amount)` (owner-only) is the mirror: accrues,
   mirrors `withdraw()`'s shape, gates on `getAvailableLiquidity` (unlike `withdrawReserves`
   — it lowers deposits against fixed reserve backing), and returns the deposit plus its
   earned interest to `pool.reserves`, keeping `withdrawReserves` the single exit. Events
@@ -95,9 +97,30 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   `dusdStabilityFeeBps` (default 2%) with the **entire** fee to `dusdReserves` — there
   are no DUSD depositors — and follows the same charge-first discipline as `accrue`.
   Not the kinked curve: nobody deposits DUSD, so utilization would be permanently zero.
+- **DUSD redemption** (`redeem` / `redeemWithBackstop`, thin `nonReentrant` wrappers over
+  private `_redeem(..., bool useBackstop)` — the same arrangement `liquidate` uses). A
+  redeemer burns DUSD and receives collateral worth the same USD less a flat
+  `REDEMPTION_FEE_BPS` (50 = 0.5%), taken from a caller-chosen position whose DUSD debt is
+  cancelled **at par**. The gate is the exact **inverse** of `liquidate`'s:
+  `healthFactor >= WAD`, else `Desultory__NotRedeemable` — healthy positions are
+  redeemable and always improved by a redemption, unhealthy ones are liquidatable, and the
+  two engines partition the book with no overlap. The collateral leg reuses
+  `_seizeCollateral` and the debt leg `_retireDusdDebt` (extracted from `repayDUSD` so both
+  retire DUSD debt through identical arithmetic, which is what makes
+  `property_dusdDebtReconciles` hold by construction). The fee is never a separate
+  transfer: it is the difference between the DUSD burned and the collateral paid out. On
+  the ordinary path only the net figure leaves the position, so the fee stays there as
+  collateral it no longer owes debt against; on the backstopped path the gross figure
+  leaves and the remainder is booked to `pool.reserves`, because the protocol supplied the
+  liquidity via `_commitBackstop` (redemption is that function's **second** caller). The
+  redeemer's take is the net figure either way, so the arbitrage threshold stays a single
+  number. Event `Redemption`. See ADR 0007 and `docs/Protocol/DUSD.md`.
 - `userBorrowedAmountUSD` adds DUSD debt **at par ($1)** after its per-token loop, so
-  every LTV check, `healthFactor` and the NFT transfer gate see it. The par
-  assumption is a known hole until the peg is designed — see `docs/Protocol/Cross-Chain.md`.
+  every LTV check, `healthFactor` and the NFT transfer gate see it. That par convention is
+  deliberately **unchanged** by the redemption work: redemption is what now *enforces* it,
+  since below $0.995 buying DUSD and redeeming it is profitable and burns supply until the
+  discount closes. Only its comment changed. It is a floor, not a band — nothing caps DUSD
+  above $1, and supply caps (C2.2) are not built. See `docs/Protocol/DUSD.md`.
 - Two distinct collateral-weighted views, deliberately separate: `userMaxBorrowValueUSD`
   (LTV-weighted — "may this borrow more?", checked directly by `borrow`/`withdraw`) and
   `weightedCollateralUSD` (liquidation-threshold-weighted — "may this be seized?", feeds
@@ -175,6 +198,15 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   deploy has no peer. Reads `PRIVATE_KEY` env var; every `Ownable` is owned by
   `vm.addr(deployerKey)`.
 
+### `src/libraries/RedemptionMath.sol` — redemption fee arithmetic, storage-free
+- Two pure, unit-agnostic functions forming an inverse **pair**, kept adjacent for the
+  reason ADR 0004 gives about `LiquidationMath`: a disagreeing inverse pair is the defect
+  class the old liquidation engine was full of. `collateralFromDusd` (USD of collateral for
+  a DUSD burn, net of the fee) rounds **down**; `dusdFromCollateral` (the inverse) rounds
+  **up**, because the inverse is only ever used to recompute a *capped* figure downward and
+  rounding it down there would hand out free collateral on every partial fill. Both
+  directions favour the pool, per the protocol's rounding policy.
+
 ### `src/libraries/LiquidationMath.sol` — liquidation arithmetic, storage-free
 - Pure functions only, unit-agnostic (caller passes both operands in the same unit):
   `healthFactor` (threshold-weighted collateral over debt, WAD-scaled, max at zero
@@ -184,7 +216,7 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   function is now wired into `Desultory.liquidate` (see `src/Desultory.sol` above).
 
 ### `test/`
-- `Desultory.t.sol` — 51 tests: deposit/withdraw/borrow/repay on the positionId
+- `Desultory.t.sol` — 84 tests: deposit/withdraw/borrow/repay on the positionId
   API, interest accrual & lender yield (incl. 10% reserve check), NFT-transfer
   control handoff, unhealthy-transfer gating, health-factor semantics (threshold-
   vs LTV-weighted, the buffer band between them), scaled-getter reconstruction,
@@ -196,6 +228,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   repayment back-solved down to match, and `totalBadDebtUSD` recognition (and
   non-recognition when collateral remains).
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
+- `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
+  `testFuzzRoundTripNeverFavorsTheRedeemer`.
 - `Position.t.sol` — 7 unit tests for mint auth, `setProtocol` wiring, and the
   health-gated `_update` hook (via a stub protocol).
 - `DUSD.t.sol` — minter gating on `mint`/`burn`, owner gating on `setMinter`, and that
@@ -210,15 +244,24 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   from one scaffold (`Setup` → `BeforeAfter` → `Properties` → `TargetFunctions` →
   `CryticTester`/`CryticToFoundry`). Three borrower actors plus a fourth, `liquidator`,
   that never opens a position (funded and approved, only ever calls `liquidate`).
-  Clamped targets over deposit/withdraw/borrow/repay/liquidate plus time warps and wide
-  oracle price movement. Also drives `borrowDUSD`/`repayDUSD`. Asserts eleven
-  internal-consistency invariants: the original eight plus three liquidation properties
+  Clamped targets over deposit/withdraw/borrow/repay/liquidate/redeem plus time warps and
+  wide oracle price movement. Also drives `borrowDUSD`/`repayDUSD`. Asserts twelve
+  internal-consistency invariants: the original eight, three liquidation properties and
+  the backstop subset property
   (bad debt is monotone, a healthy position is never liquidatable, and the liquidator is
   never worse off than what they paid, checked against `LiquidationMath` directly rather
   than through a full liquidation). Economic solvency is deliberately not asserted, and a
   property that liquidation improves health factor is deliberately NOT asserted (paying a
   bonus can make HF worse by design). Prose statement of the invariants is in
-  `docs/Audit/Invariants.md`; the reasoning is ADR 0002. `AccrualLeak.t.sol` is the
+  `docs/Audit/Invariants.md`; the reasoning is ADR 0002. Redemption is asserted
+  **in-target** rather than as a property (`dusdBurned >= USD value of collateral the
+  redeemer received`): the spec's "redemption never lowers the target's health factor"
+  turned out to be unassertable, because `redeem` accrues internally so a before/after
+  comparison charges realized interest to the redemption. Two coverage limitations are
+  recorded in `docs/Audit/Invariants.md` and must not be read past —
+  `desultory_redeemWithBackstop` fired **zero** times in 300,000 Medusa calls.
+  **`property_borrowIndexOutpacesLiquidityIndex` is currently failing under Medusa**, a
+  pre-existing defect confirmed on `master`; see `next_steps.md`. `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding
   `liquidate` to the target surface found `property_borrowIndexOutpacesLiquidityIndex`
   (pre-existing, not one of the three new properties) failing: `_seizeCollateral` moved a

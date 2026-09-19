@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 7f90054
+verified-against: 2502b9a
 ---
 
 # Invariants
@@ -131,6 +131,55 @@ the class of slip where a commit or a release moves one line and not the other �
 invariant 1 would also catch, but only while every position in the harness is enumerable;
 this one holds regardless.
 
+## The one assertion that is not a property
+
+Redemption is asserted **inside its target functions**, not as a `property_`:
+
+> `dusdBurned >= getValueUSD(collateralAsset, collateralReceivedByRedeemer)`
+
+The redeemer never walks away with more USD of collateral than the DUSD they burned. That
+difference **is** the redemption fee, and its sign is the whole economic guarantee: if it
+ever inverted, redemption would be a subsidy rather than a floor. It catches a mis-signed
+fee, a flipped inverse in `RedemptionMath`, or a back-solve rounding the wrong way.
+
+**It replaced a property that was unsound, and the replacement is the interesting part.**
+The design spec asked for "redemption never lowers the target's health factor" — the
+obvious statement of decision 2 in [[0007-dusd-redemption]]. Medusa failed it, and the
+failure was genuine: `healthFactor` is a function of the indices, and `redeem` calls
+`_accrueAll()` internally, so a before/after comparison straddles an accrual boundary and
+charges realized stability-fee interest to the redemption that happened to be standing
+there. Observed: `hfBefore = 3.0e18`, `hfAfter = 2.99923…e18`. **The property was wrong,
+not the code.** The replacement compares two figures produced by the same call, so no
+amount of elapsed simulated time can perturb it.
+
+State the residual gap plainly: the new assertion catches the redeemer being **over-paid**.
+It does not catch debt being **under-cleared** relative to the collateral removed — a
+redemption that took the right collateral and retired too little debt would satisfy it.
+That class is covered by `testRedeemImprovesTheTargetHealthFactor` in
+`test/Desultory.t.sol` as a unit test, where no time passes between the snapshot and the
+call, and by nothing in the fuzzer.
+
+### Two coverage limitations on the redemption surface
+
+Do **not** read the headline fuzzer counts as coverage of redemption.
+
+1. **`desultory_redeemWithBackstop`'s real call fired zero times across 300,000 Medusa
+   calls.** Four preconditions must align — the position healthy, holding DUSD debt,
+   holding the chosen collateral, and the pool short enough to need the backstop — and the
+   last two pull against each other, since a pool that cannot spare collateral is usually
+   one where the position is not comfortably healthy in it. The backstopped redemption path
+   is covered by its four unit tests in `test/Desultory.t.sol` and **effectively not by the
+   fuzzer at all**. The precondition is not relaxable: `healthFactor >= WAD` *is* the
+   feature.
+2. **`desultory_redeem` fired 14 times at `--test-limit 50000`** (25 at 300,000). Non-zero,
+   and thin. A campaign that reports the target as "passing" is reporting mostly that its
+   preconditions were not met.
+
+Also worth carrying forward: **lcov line coverage on this harness is unreliable.** It
+reported non-zero hits on lines *after* a zero-hit call site, which cannot be true. Counter
+instrumentation was used instead. Whoever next reaches for coverage numbers here should not
+trust lcov.
+
 ## Deliberately not asserted
 
 **Economic solvency** (collateral USD ≥ debt USD). [[Liquidations]] is now specified and
@@ -179,6 +228,41 @@ this harness has found in reviewed code, after the accrual leak above — the ar
 for running it before the cross-chain work extends the accounting, made in
 [[0002-internal-consistency-invariants]], has now paid off twice.
 
+**`property_borrowIndexOutpacesLiquidityIndex` is failing again, and this time nothing
+was fixed.** This is the **third** real defect this harness has caught in reviewed,
+merged code, after the accrual leak and the unbounded seizure above — and it is the only
+one still open.
+
+It is **confirmed on `master`**, with none of the redemption work present: `master` at
+`542f710`, `medusa fuzz --test-limit 120000` → 23 passed, **1 failed**, the same property.
+On the redemption branch it reproduces faster (`--test-limit 50000` → 25 passed, 1 failed)
+because that branch supplied a richer corpus, not because it introduced anything. Two
+independent minimal reproductions contain **zero redemption calls** — only
+`desultory_deposit`, `oracle_setPrice`, `desultory_borrow`, `desultory_repay`.
+
+Mechanism, from `accrue()`:
+
+```
+liquidityIndex growth = (interest - toReserves) / totalDeposits  = 0.9*i / D
+borrowIndex   growth  = factor                                   ~ i / B
+```
+
+so `liquidityIndex` outpaces `borrowIndex` exactly when `0.9*B > D` — the same condition
+[[0004-liquidation-engine]] names as the reason the seizure availability bound exists.
+
+The **economic** path cannot reach it. From `D0 = B0`, deposits track
+`Dn = 0.9*Bn + 0.1*P`, which stays above `0.9*Bn` forever, and `borrow`/`withdraw` both
+gate on `D >= B`. What reaches it is **dust**:
+`totalDeposits = __fromScaledDown(51, liquidityIndex)` floors to a single-digit integer,
+and `liquidityIndex * (interest - toReserves) / totalDeposits` against that denominator
+blows the index up in one step. The reported failing pool state — `totalScaledDeposits:
+51`, `reserves: 0` — matches exactly.
+
+Not fixed here: it is a defect in core accrual, and folding a fix for it into a redemption
+branch would have buried it. Evidence, logs and both call sequences:
+`.superpowers/sdd/2026-09-19-dusd-redemption/evidence/`. It is the START HERE item in
+`next_steps.md`.
+
 A wei-scale rounding seam was found and deliberately left in place rather than
 patched: the availability bound is computed in token units, but `_seizeCollateral`
 converts with `__toScaledUp` (rounds up), so a seizure that exactly saturates the cap
@@ -206,9 +290,13 @@ medusa fuzz --test-limit 50000
 echidna . --contract CryticTester --config echidna.yaml --test-limit 30000
 ```
 
-Currently Medusa 24/24 and Echidna 25/25 green, up from 21/21 and 22/22. Each tool counts
-the two new target functions (`desultory_liquidateWithBackstop`,
-`desultory_releaseBackstop`) alongside the new property, which is why both rose by three.
+Echidna is **27/27** at `--test-limit 30000`, up from 25/25 — the two redemption target
+functions (`desultory_redeem`, `desultory_redeemWithBackstop`) are what the count rose by;
+no new `property_` was added, because the redemption assertion lives in-target (above).
+
+**Medusa is not green.** It reports 25 passed, 1 failed at `--test-limit 50000`, and the
+failure is `property_borrowIndexOutpacesLiquidityIndex` — a pre-existing defect in shipped
+code, not a redemption bug. See the section below.
 
 Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 
@@ -220,3 +308,5 @@ Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 - [[Liquidations]] — the surface invariants 9-12 constrain
 - [[0006-internal-liquidation-backstop]] — the backstop that added invariant 12 and a
   second term to invariant 1
+- [[DUSD]] — the redemption path the in-target assertion guards
+- [[0007-dusd-redemption]] — the health-factor claim that turned out to be unassertable
