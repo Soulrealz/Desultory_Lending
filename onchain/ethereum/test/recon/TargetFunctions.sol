@@ -5,6 +5,7 @@ import {BaseTargetFunctions} from "@chimera/BaseTargetFunctions.sol";
 import {vm} from "@chimera/Hevm.sol";
 
 import {Properties} from "./Properties.sol";
+import {Desultory} from "../../src/Desultory.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 
@@ -239,6 +240,74 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
             ghostPaidIn[debtSlot] += debtToken.balanceOf(address(desultory)) - paidBefore;
             ghostPaidOut[collatSlot] += seizedBefore - collatToken.balanceOf(address(desultory));
         }
+    }
+
+    /// @dev the backstopped liquidation path. Same ghost handling as desultory_liquidate —
+    /// the reserve commit moves no tokens, so only the seizure payout and the repayment
+    /// show up in the balances.
+    function desultory_liquidateWithBackstop(uint8 positionSeed, uint8 debtSeed, uint8 collatSeed, uint256 amount)
+        public
+        updateGhosts
+    {
+        precondition(positionIds.length > 0);
+        uint256 positionId = _getPosition(positionSeed);
+        precondition(desultory.healthFactor(positionId) < 1e18);
+
+        MockERC20 debtToken = _getToken(debtSeed);
+        MockERC20 collatToken = _getToken(collatSeed);
+
+        uint256 debt = desultory.getPositionBorrowForToken(positionId, address(debtToken));
+        precondition(debt > 0);
+        precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
+
+        amount = between(amount, 1, debt);
+
+        uint256 debtSlot = _tokenSlot(debtSeed);
+        uint256 collatSlot = _tokenSlot(collatSeed);
+
+        if (debtSlot == collatSlot) {
+            uint256 before = debtToken.balanceOf(address(desultory));
+
+            vm.prank(liquidator);
+            desultory.liquidateWithBackstop(positionId, address(debtToken), address(collatToken), amount);
+
+            uint256 afterBal = debtToken.balanceOf(address(desultory));
+            if (afterBal >= before) {
+                ghostPaidIn[debtSlot] += afterBal - before;
+            } else {
+                ghostPaidOut[debtSlot] += before - afterBal;
+            }
+        } else {
+            uint256 paidBefore = debtToken.balanceOf(address(desultory));
+            uint256 seizedBefore = collatToken.balanceOf(address(desultory));
+
+            vm.prank(liquidator);
+            desultory.liquidateWithBackstop(positionId, address(debtToken), address(collatToken), amount);
+
+            ghostPaidIn[debtSlot] += debtToken.balanceOf(address(desultory)) - paidBefore;
+            ghostPaidOut[collatSlot] += seizedBefore - collatToken.balanceOf(address(desultory));
+        }
+    }
+
+    /// @dev the owner returning committed backstop capital to reserves. Owner-only, so it
+    /// is pranked as the deployer like desultory_withdrawReserves — but unlike that one it
+    /// moves no tokens, so the ghosts must NOT be touched here.
+    function desultory_releaseBackstop(uint8 tokenSeed, uint256 amount) public updateGhosts {
+        MockERC20 token = _getToken(tokenSeed);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(address(token));
+        precondition(pool.backstopScaledDeposits > 0);
+
+        uint256 committed = pool.backstopScaledDeposits * pool.liquidityIndex / 1e18;
+        precondition(committed > 0);
+
+        uint256 available = desultory.getAvailableLiquidity(address(token));
+        precondition(available > 0);
+
+        amount = between(amount, 1, committed < available ? committed : available);
+
+        vm.prank(desultory.owner());
+        desultory.releaseBackstop(address(token), amount);
     }
 
     /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is
