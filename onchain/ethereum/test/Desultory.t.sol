@@ -1602,8 +1602,12 @@ contract DesultoryTest is Test {
 
         assertLt(desultory.healthFactor(1), 1e18, "fixture must be unhealthy");
 
+        // no time passes here, so the health factor is deterministic and the selector can
+        // carry its exact payload rather than accepting any revert at all
         vm.prank(bob);
-        vm.expectRevert(); // Desultory__NotRedeemable; the HF it carries is read inside the call
+        vm.expectRevert(
+            abi.encodeWithSelector(Desultory.Desultory__NotRedeemable.selector, 1, desultory.healthFactor(1))
+        );
         desultory.redeem(1, weth, 500e18);
     }
 
@@ -1630,12 +1634,22 @@ contract DesultoryTest is Test {
     }
 
     function testRedeemClampsToThePositionsDusdDebt() public {
-        _redeemableAlice();
+        _redeemableAlice(); // alice owes 5000; the fixture leaves bob holding 3000
+
+        // top bob up to 6000 on his own position rather than raise the shared fixture's
+        // default — every other redemption test wants the 3000 it hands out
+        vm.prank(bob);
+        desultory.borrowDUSD(2, 3_000e18);
+
+        uint256 bobDusdBefore = dusd.balanceOf(bob);
 
         vm.prank(bob);
-        desultory.redeem(1, weth, 3_000e18); // bob has exactly 3000; alice owes 5000
+        desultory.redeem(1, weth, 6_000e18); // MORE than the 5000 owed: the clamp must bind
 
-        assertApproxEqAbs(desultory.getPositionDusdDebt(1), 2_000e18, 1e12, "clamped, not reverted");
+        assertApproxEqAbs(desultory.getPositionDusdDebt(1), 0, 1e12, "clamped to the debt, not reverted");
+        assertApproxEqAbs(
+            bobDusdBefore - dusd.balanceOf(bob), 5_000e18, 1e12, "only the debt was burned, not the 6000 offered"
+        );
     }
 
     /// @dev the USDC pool saturated (zero available liquidity, real reserves) with a
@@ -1721,5 +1735,67 @@ contract DesultoryTest is Test {
         uint256 balance = MockERC20(usdc).balanceOf(address(desultory));
 
         assertGe(balance + debt, deposits + pool.reserves, "custody must still cover obligations");
+    }
+
+    /// @dev the WETH twin of _saturatedPoolWithRedeemablePosition: a saturated WETH pool
+    /// (zero available liquidity, real reserves) and a HEALTHY position holding WETH
+    /// collateral and owing DUSD. WETH rather than USDC because the zero-delivery case
+    /// needs a collateral unit worth more than the DUSD offered — at $2000 a WETH, one wei
+    /// of DUSD converts to zero wei of collateral.
+    function _saturatedWethPoolWithRedeemablePosition() internal returns (address who) {
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2_000e18);
+
+        vm.prank(alice);
+        desultory.deposit(0, weth, 1_000e18); // position 1, alice: $2m of collateral
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 5_000e18); // healthy with room to spare
+
+        // bob drains the WETH pool down to 5 WETH of cash, against USDC collateral
+        MockERC20(usdc).mint(bob, 3_000_000e18);
+        vm.prank(bob);
+        desultory.deposit(0, usdc, 3_000_000e18); // position 2
+        vm.prank(bob);
+        desultory.borrow(2, weth, 995e18);
+
+        vm.warp(block.timestamp + 365 days); // interest -> reserves on the next accrual
+
+        // both feeds must be refreshed after the warp or OracleLib's 3h timeout reverts
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2_000e18);
+        MockV3Aggregator(deploy.getFeedI(1)).updateAnswer(100_000_000); // USDC, $1
+
+        assertGe(desultory.healthFactor(1), 1e18, "alice must stay healthy");
+
+        who = makeAddr("weth-redeemer");
+        vm.prank(alice);
+        dusd.transfer(who, 1_000e18);
+    }
+
+    /// @dev a redemption that delivers nothing must not commit reserves. One wei of DUSD
+    /// converts to zero wei of WETH, and before the `removed == 0` guard the call sailed
+    /// past the `removed > cap` branch (0 > 0 is false, so its ZeroAmount check never ran),
+    /// committed reserves into backstopScaledDeposits and returned successfully having
+    /// transferred nothing. Those deposits are recoverable only through releaseBackstop,
+    /// which is gated on available liquidity — zero in exactly this pool — so a few wei
+    /// froze the reserves out of withdrawReserves' reach.
+    function testOneWeiBackstoppedRedeemCommitsNothing() public {
+        address who = _saturatedWethPoolWithRedeemablePosition();
+
+        uint256 reservesBefore = desultory.getPoolInfo(weth).reserves;
+        uint256 backstopBefore = desultory.getPoolInfo(weth).backstopScaledDeposits;
+
+        vm.prank(who);
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.redeemWithBackstop(1, weth, 1);
+
+        assertEq(desultory.getPoolInfo(weth).reserves, reservesBefore, "reserves untouched");
+        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, backstopBefore, "nothing converted to a deposit");
+
+        // and the fixture really was one where a commit would have fired: the same call at
+        // a size that delivers collateral still commits, so the guard blocks only the
+        // zero-delivery case rather than the backstop as a whole
+        vm.prank(who);
+        desultory.redeemWithBackstop(1, weth, 1_000e18);
+        assertEq(desultory.getAvailableLiquidity(weth), 0, "the pool was saturated throughout");
+        assertGt(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "reserves were commitable all along");
     }
 }

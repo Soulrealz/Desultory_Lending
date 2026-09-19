@@ -114,7 +114,10 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   leaves and the remainder is booked to `pool.reserves`, because the protocol supplied the
   liquidity via `_commitBackstop` (redemption is that function's **second** caller). The
   redeemer's take is the net figure either way, so the arbitrage threshold stays a single
-  number. Event `Redemption`. See ADR 0007 and `docs/Protocol/DUSD.md`.
+  number. A redemption whose collateral figure floors to zero reverts
+  `Desultory__ZeroAmount` before `_commitBackstop` is reached, so a dust call cannot
+  convert reserves into `backstopScaledDeposits` for a delivery of nothing. Event
+  `Redemption`. See ADR 0007 and `docs/Protocol/DUSD.md`.
 - `userBorrowedAmountUSD` adds DUSD debt **at par ($1)** after its per-token loop, so
   every LTV check, `healthFactor` and the NFT transfer gate see it. That par convention is
   deliberately **unchanged** by the redemption work: redemption is what now *enforces* it,

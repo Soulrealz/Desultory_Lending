@@ -813,9 +813,18 @@ contract Desultory is Ownable, ReentrancyGuard {
         // pool.reserves falls by exactly `committed`. property_custodyReconciles is
         // balance + borrows >= deposits + reserves, so its right-hand side can gain up to
         // 1 wei per commit with nothing on the left to match. This is the one rounding
-        // direction on this path that runs against the pool; it is bounded at <= 1 wei per
-        // commit and every commit costs a real liquidation, so it is a documented seam
-        // rather than a solvency concern. See docs/Protocol/Liquidations.md.
+        // direction on this path that runs against the pool, and it is bounded at <= 1 wei
+        // per commit.
+        //
+        // Commits are NOT self-limiting. That argument held while liquidateWithBackstop —
+        // which requires an unhealthy position — was the only caller. _redeem is now a
+        // second caller and it is gated on healthFactor >= WAD, so a commit is cheap and
+        // permissionless: any redeemer can fire one against any healthy position. What
+        // stops a zero-value call from triggering one is _redeem's `removed == 0` guard,
+        // which runs before this function is reached. A larger dusdAmount still triggers a
+        // full-deficit commit sized on the pool's own shortfall rather than on `want`;
+        // that shape is deliberate and out of scope here. The seam remains a documented
+        // rounding seam rather than a solvency concern. See docs/Protocol/Liquidations.md.
         //
         // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so
         // deposits fall by at least `amount` while reserves rise by exactly `amount`, and
@@ -942,8 +951,10 @@ contract Desultory is Ownable, ReentrancyGuard {
      * @dev retire `amount` of a position's DUSD debt.
      *
      * Shared by repayDUSD and the redemption path so both reduce debt through identical
-     * arithmetic — property_dusdDebtReconciles holds by construction rather than by two
-     * independently maintained copies agreeing.
+     * arithmetic. It is not the only copy: _retireDebt's DUSD branch carries a third,
+     * verbatim inline duplicate, used by liquidate() when debtAsset == DUSD. The three
+     * agree today, and property_dusdDebtReconciles depends on them continuing to — a
+     * change here has to be mirrored there.
      *
      * The scaled reduction rounds DOWN, so the position is credited with no more relief
      * than the payment warrants. Same direction repayDUSD used before this extraction.
@@ -968,7 +979,10 @@ contract Desultory is Ownable, ReentrancyGuard {
      * The caller names the target, exactly as liquidate() does. The gate is the INVERSE
      * of liquidate()'s: only HEALTHY positions are redeemable. Redemption cancels debt at
      * par while removing collateral, so it improves the target's health factor whenever
-     * hf > threshold * (1 - fee) — about 0.896 at WETH's 0.75 threshold. Gating at WAD
+     * hf > threshold * (1 - fee) on the ordinary path, and hf > threshold on the
+     * backstopped one because the gross figure leaves the position — at most 0.8955 and
+     * 0.90 at the shipped parameters, and below WAD for any admissible threshold, since
+     * the constructor caps liquidationThreshold at 100. Gating at WAD
      * sits above that with room to spare and partitions the book cleanly: healthy
      * positions are redeemable and always improved, unhealthy ones are liquidatable and
      * belong to the other engine. Nobody can be pushed further underwater by a redeemer.
@@ -1041,6 +1055,18 @@ contract Desultory is Ownable, ReentrancyGuard {
             collateralAsset,
             useBackstop ? dusdAmount : RedemptionMath.collateralFromDusd(dusdAmount, REDEMPTION_FEE_BPS)
         );
+
+        // A zero delivery must never reach _commitBackstop. A dusdAmount small enough
+        // relative to the collateral's unit price floors `removed` to zero — one wei of
+        // DUSD against WETH at $2000, say — and without this guard the `removed > cap`
+        // branch below is 0 > 0, so it never fires its own ZeroAmount check and the call
+        // still commits reserves, converting them into backstopScaledDeposits that
+        // releaseBackstop cannot recover while the pool stays saturated. A zero-delivery
+        // redemption burns DUSD for nothing on the ordinary path too, so the guard sits
+        // ahead of both.
+        if (removed == 0) {
+            revert Desultory__ZeroAmount();
+        }
 
         // The position may not hold that much, and the pool may not be able to spare it —
         // the same bound withdraw(), borrow() and liquidate() all enforce. Cap what leaves
@@ -1142,6 +1168,9 @@ contract Desultory is Ownable, ReentrancyGuard {
      */
     function _retireDebt(uint256 positionId, address asset, uint256 amount) private {
         if (asset == address(__DUSD)) {
+            // this branch is an inline copy of _retireDusdDebt, which repayDUSD and the
+            // redemption path share. Keep the two in step — property_dusdDebtReconciles
+            // assumes every DUSD retirement uses this same arithmetic.
             uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
             if (scaled > __scaledDusdDebt[positionId]) {
                 scaled = __scaledDusdDebt[positionId];

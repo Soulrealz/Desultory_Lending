@@ -168,9 +168,11 @@ Do **not** read the headline fuzzer counts as coverage of redemption.
    holding the chosen collateral, and the pool short enough to need the backstop — and the
    last two pull against each other, since a pool that cannot spare collateral is usually
    one where the position is not comfortably healthy in it. The backstopped redemption path
-   is covered by its four unit tests in `test/Desultory.t.sol` and **effectively not by the
-   fuzzer at all**. The precondition is not relaxable: `healthFactor >= WAD` *is* the
-   feature.
+   is covered by its five unit tests in `test/Desultory.t.sol` — the fifth being
+   `testOneWeiBackstoppedRedeemCommitsNothing`, which pins the zero-delivery guard — and
+   **effectively not by the fuzzer at all**. The precondition is not relaxable:
+   `healthFactor >= WAD` *is* the feature. The zero-delivery case is a subset of this
+   one, so the fuzzer never reached it either; the unit test named above pins it.
 2. **`desultory_redeem` fired 14 times at `--test-limit 50000`** (25 at 300,000). Non-zero,
    and thin. A campaign that reports the target as "passing" is reporting mostly that its
    preconditions were not met.

@@ -296,9 +296,16 @@ etc.) is out of scope for this project.
   `property_custodyReconciles` is `balance + borrows >= deposits + reserves`, so its
   right-hand side can gain up to **1 wei per commit** with nothing on the left to match.
   This is the one rounding direction on the whole backstop path that runs *against* the
-  pool rather than for it. It is acceptable because the bound is tight — at most 1 wei,
-  and every commit costs a real liquidation, so there is no way to grind it — and because
-  the pool's own cash is untouched either way.
+  pool rather than for it. It is acceptable because the bound is tight — at most 1 wei
+  per commit — and because the pool's own cash is untouched either way.
+
+  The bound used to carry a second argument: that every commit costs a real liquidation,
+  so there is no way to grind it. That argument no longer holds. `redeemWithBackstop`
+  reaches `_commitBackstop` against a **healthy** position, so a commit is now cheap and
+  permissionless. `_redeem` rejects a redemption that would deliver zero collateral
+  (`removed == 0`) before the commit can fire, which closes the free case; a redemption
+  that does deliver still commits against the pool's whole deficit rather than against
+  what it removes.
 
   `releaseBackstop` is safe under the same analysis, and the contrast is worth writing
   down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while

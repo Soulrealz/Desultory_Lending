@@ -98,6 +98,11 @@ Five decisions, each with its reasoning:
    > 0.896 at WETH's 0.75 threshold". The number is right and the attribution is not —
    > 0.8955 is USDC's 0.90 threshold. The bound is the same either way, because the one
    > that binds is the largest.
+   >
+   > That comment has since been corrected in place. It now gives the bound for both
+   > paths and the reason it is safe for *any* admissible threshold rather than only for
+   > today's token list: the constructor rejects a `liquidationThreshold` above 100, so
+   > `w_A <= 1` unconditionally.
 
    Gating at `WAD` therefore sits above the worst boundary with roughly 10% of room, and
    it partitions the book with no overlap and no gap: **healthy positions are redeemable,
@@ -232,6 +237,22 @@ flowchart TD
   now shared machinery, and the wei-scale rounding seam that record documents is inherited
   on the redemption path along with it. `releaseBackstop` and `withdrawReserves` remain
   the only ways committed capital comes back, so the custody argument is unchanged.
+- **A rational redeemer always chooses the backstopped path.** The redeemer's net receipt
+  is identical on both, so `redeemWithBackstop` costs them nothing and moves `D·f` from
+  the borrower to `pool.reserves`. The "real compensation for being targeted" that answers
+  the fairness objection to caller-chosen targets is therefore rarely paid in practice. On
+  a liquid pool `_commitBackstop` returns at its first branch, so the borrower loses the
+  fee for a backstop that did nothing. The design accepts this: the borrower is still
+  never made worse off in health terms, and decision 5's argument for an explicit entry
+  point is about who chooses, not about which choice is taken.
+- **Self-redemption on the backstopped path is a liquidity queue-jump.** A borrower
+  holding DUSD can redeem against their own position to make the protocol convert reserves
+  and fund their own collateral exit from a pool where `getAvailableLiquidity == 0`, paying
+  0.5% for it. Economically it is repay-plus-withdraw with the availability bound bought
+  off — a route around a constraint ordinary depositors do not have. It is accepted as the
+  price of the backstop being permissionless, and it is bounded by `pool.reserves`, which
+  the protocol was free to withdraw anyway. Self-redemption on the ordinary path is
+  strictly safe and equivalent to `repayDUSD` + `withdraw(net)`.
 - **`property_dusdDebtReconciles` holds by construction on the new path**, because
   `_retireDusdDebt` was extracted from `repayDUSD` and both retire debt through the same
   arithmetic rather than through two copies that have to be kept in agreement. The new

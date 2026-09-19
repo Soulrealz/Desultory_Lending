@@ -129,7 +129,9 @@ sequenceDiagram
     D->>D: clamp dusdAmount to the position's DUSD debt
     D->>M: collateralFromDusd(dusdAmount, 50bps) — rounds DOWN
     M-->>D: net USD (gross USD on the backstop path)
-    D->>D: removed = _usdToTokenAmount(...), capped to collateral held
+    D->>D: removed = _usdToTokenAmount(...)
+    D->>D: revert ZeroAmount if removed == 0<br/>no zero delivery reaches the backstop
+    D->>D: cap removed to collateral held
     opt useBackstop
         D->>D: _commitBackstop(collateralAsset, cap)
         Note over D: reserves -> backstopScaledDeposits, no token moves
@@ -164,6 +166,12 @@ fill possible, so the protocol keeps it.
 Because the borrower is the party whose outcome differs between the two, `redeemWithBackstop`
 is a **separate entry point and never an automatic fallback**. Against a saturated pool,
 `redeem` takes the `Desultory__ZeroAmount` revert instead of escalating.
+
+A redemption too small to move any collateral takes that same revert on **both** paths.
+`removed` is checked against zero before `_commitBackstop` is reached, so a dust
+`redeemWithBackstop` cannot convert reserves into `backstopScaledDeposits` — capital
+`releaseBackstop` cannot return while the pool stays saturated — in exchange for a
+delivery of nothing. See [[Liquidations]] on the commit's rounding seam.
 
 ### The arithmetic
 
