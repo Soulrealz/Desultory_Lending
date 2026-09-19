@@ -3,6 +3,36 @@
 Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module map and
 `docs/` for the vault. Written 2026-09-19, last updated against commit `422dd17` on `master`.
 
+## START HERE
+
+**Brainstorm D2's internal liquidation backstop.** That is the next piece of work, and it
+has not been started — no spec, no plan, no code.
+
+Invoke `superpowers:brainstorming` with it. Classify it **architectural**, not bounded: it
+changes how liquidation, reserve accounting and the custody invariant fit together, so it
+gets the full path — questions, approaches, a sectioned design, a written spec, then
+`superpowers:writing-plans`.
+
+Read `## Do this next` below before asking the first question. It lists the five things
+the design has to settle and the reasoning behind picking this over C2, D3 and governance.
+Skim `docs/Protocol/Liquidations.md` and `docs/Decisions/0004-liquidation-engine.md` too —
+the backstop exists to close a gap those two document, and arriving without that context
+wastes the first few questions.
+
+Spec and plan paths follow the user's global convention:
+
+```
+docs/superpowers/specs/liquidations/<Month_YYYY>/YYYY-MM-DD-internal-backstop-design.md
+docs/superpowers/plans/liquidations/<Month_YYYY>/YYYY-MM-DD-internal-backstop.md
+```
+
+Note `docs/superpowers/` is gitignored, so those two files live on disk but are never
+committed. Everything else in `docs/` is tracked and must be.
+
+Do not start implementing before the user approves the design. Do not touch `accrue()`, do
+not weaken a fuzzing invariant, and do not write down `liquidityIndex` — see
+`## How to work in this repo`.
+
 ## Where the project is
 
 **Desultory Lending** is an over-collateralized lending protocol. Four decomposed
