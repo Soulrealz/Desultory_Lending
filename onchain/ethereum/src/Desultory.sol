@@ -41,6 +41,8 @@ contract Desultory is Ownable, ReentrancyGuard {
     error Desultory__PositionDoesNotExist(uint256 positionId);
     error Desultory__InsufficientLiquidity(address token);
     error Desultory__FeeTooHigh();
+    error Desultory__ZeroAddress();
+    error Desultory__InsufficientReserves(address token);
     error Desultory__NoDusdDebt(uint256 positionId);
     error Desultory__AdapterNotSet();
     error Desultory__DestinationNotAllowed(uint32 eid);
@@ -59,6 +61,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     event AdapterSet(address indexed adapter);
     event DestinationSet(uint32 indexed eid, bool allowed);
     event DusdStabilityFeeSet(uint16 bps);
+    event ReservesWithdrawn(address indexed token, address indexed to, uint256 amount);
     event DusdBorrow(uint256 indexed position, address indexed recipient, uint256 amount, uint32 dstEid);
     event DusdRepay(uint256 indexed position, address indexed payer, uint256 amount);
     event DusdIndexUpdate(uint256 timestamp, uint256 dusdBorrowIndex, uint256 dusdReserves);
@@ -282,6 +285,49 @@ contract Desultory is Ownable, ReentrancyGuard {
     function setAllowedDestination(uint32 eid, bool allowed) external onlyOwner {
         allowedDestination[eid] = allowed;
         emit DestinationSet(eid, allowed);
+    }
+
+    /**
+     * @dev withdraw a token pool's accumulated protocol revenue.
+     *
+     * Reserves fill from three places: the RESERVE_FACTOR cut of borrow interest, and
+     * LIQ_PROTOCOL_SHARE of every liquidation bonus, both in this token. Until now there
+     * was no way out of the contract for either.
+     *
+     * This cannot strand depositors. The identity getAvailableLiquidity documents is
+     * cash = deposits + reserves - debt; withdrawing X drops the balance by X and
+     * reserves by X, so both sides of it fall together. That is why no liquidity gate is
+     * needed here, unlike withdraw() and borrow(), which move deposits against a fixed
+     * reserve backing.
+     *
+     * DUSD reserves are deliberately NOT withdrawable here. dusdReserves is a claim, not
+     * a balance: borrowDUSD mints to the borrower and repayDUSD burns from the payer, so
+     * the protocol never holds DUSD. Paying it out would mean minting unbacked supply,
+     * which is a monetary decision belonging with the peg design, not with treasury
+     * plumbing.
+     */
+    function withdrawReserves(address token, address to, uint256 amount)
+        external
+        onlyOwner
+        moreThanZero(amount)
+        isAllowedToken(token)
+    {
+        if (to == address(0)) {
+            revert Desultory__ZeroAddress();
+        }
+
+        // reserves grow during accrual; reading them first would pay out a stale figure
+        accrue(token);
+
+        Pool storage pool = __pools[token];
+        if (amount > pool.reserves) {
+            revert Desultory__InsufficientReserves(token);
+        }
+
+        pool.reserves -= amount;
+
+        IERC20(token).safeTransfer(to, amount);
+        emit ReservesWithdrawn(token, to, amount);
     }
 
     /**

@@ -1026,4 +1026,99 @@ contract DesultoryTest is Test {
         assertGt(desultory.getPositionCollateralForToken(1, weth), 0);
         assertEq(desultory.totalBadDebtUSD(), 0, "collateral remains, nothing is written off");
     }
+
+    ///////////////////////
+    // Treasury Tests
+    ///////////////////////
+
+    /// @dev builds real reserves: alice borrows, time passes, the reserve factor takes
+    /// its 10% cut of the interest, then she repays so the cash is actually on hand.
+    function _accrueReserves() internal returns (uint256) {
+        vm.prank(bob);
+        desultory.deposit(0, usdc, 50_000e18);
+
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrow(2, usdc, 10_000e18);
+
+        vm.warp(block.timestamp + 365 days);
+
+        vm.prank(alice);
+        desultory.repay(2, usdc, type(uint256).max);
+
+        uint256 reserves = desultory.getPoolInfo(usdc).reserves;
+        assertGt(reserves, 0, "fixture must accrue reserves");
+        return reserves;
+    }
+
+    function testOwnerCanWithdrawReserves() public {
+        uint256 reserves = _accrueReserves();
+        address treasury = makeAddr("treasury");
+
+        vm.prank(desultory.owner());
+        desultory.withdrawReserves(usdc, treasury, reserves);
+
+        assertEq(MockERC20(usdc).balanceOf(treasury), reserves, "treasury received the reserves");
+        assertEq(desultory.getPoolInfo(usdc).reserves, 0, "reserves drained");
+    }
+
+    function testNonOwnerCannotWithdrawReserves() public {
+        uint256 reserves = _accrueReserves();
+
+        vm.prank(alice);
+        vm.expectRevert();
+        desultory.withdrawReserves(usdc, alice, reserves);
+    }
+
+    function testCannotWithdrawMoreReservesThanExist() public {
+        uint256 reserves = _accrueReserves();
+
+        vm.prank(desultory.owner());
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__InsufficientReserves.selector, usdc));
+        desultory.withdrawReserves(usdc, makeAddr("treasury"), reserves + 1);
+    }
+
+    function testWithdrawReservesRejectsZeroRecipient() public {
+        uint256 reserves = _accrueReserves();
+
+        vm.prank(desultory.owner());
+        vm.expectRevert(Desultory.Desultory__ZeroAddress.selector);
+        desultory.withdrawReserves(usdc, address(0), reserves);
+    }
+
+    /// @dev reserves keep growing while interest accrues, so the call must settle the
+    /// pool before reading them — otherwise the owner is paid a stale figure.
+    function testWithdrawReservesAccruesFirst() public {
+        vm.prank(bob);
+        desultory.deposit(0, usdc, 50_000e18);
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrow(2, usdc, 10_000e18);
+
+        uint256 stale = desultory.getPoolInfo(usdc).reserves;
+        vm.warp(block.timestamp + 365 days);
+
+        vm.prank(desultory.owner());
+        desultory.withdrawReserves(usdc, makeAddr("treasury"), 1);
+
+        assertGt(desultory.getPoolInfo(usdc).reserves + 1, stale, "accrual must run before the read");
+    }
+
+    /// @dev the identity getAvailableLiquidity documents: cash = deposits + reserves - debt.
+    /// Both sides of it fall by the same amount, so a withdrawal cannot strand depositors.
+    function testWithdrawingReservesLeavesDepositorsWhole() public {
+        uint256 reserves = _accrueReserves();
+
+        vm.prank(desultory.owner());
+        desultory.withdrawReserves(usdc, makeAddr("treasury"), reserves);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        uint256 deposits = pool.totalScaledDeposits * pool.liquidityIndex / WAD;
+        uint256 borrows = (pool.totalScaledBorrows * pool.borrowIndex + WAD - 1) / WAD;
+        uint256 balance = MockERC20(usdc).balanceOf(address(desultory));
+
+        assertGe(balance + borrows, deposits + pool.reserves, "custody must still cover obligations");
+    }
 }

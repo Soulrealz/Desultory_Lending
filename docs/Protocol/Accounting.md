@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 620ff7d
+verified-against: PENDING
 ---
 
 # Accounting
@@ -69,8 +69,22 @@ easy to get wrong.
 
 **The reserve cut is taken before lenders.** `RESERVE_FACTOR` is `1_000` BPS = 10%.
 Ten percent of accrued interest goes to `pool.reserves`; the remaining 90% grows
-`liquidityIndex`. Reserves accumulate in token units and, as of `5db9f71`, **there
-is no function to withdraw them** — no admin, no treasury. They just sit there.
+`liquidityIndex`. Reserves accumulate in token units, and two other paths feed the same
+pot: the whole DUSD stability fee (see [[Cross-Chain]]) and `LIQ_PROTOCOL_SHARE` — 30% —
+of every liquidation bonus (see [[Liquidations]]).
+
+`withdrawReserves(token, to, amount)` pays a pool's reserves out to the owner's chosen
+recipient. It accrues first, so the figure it reads is settled rather than stale.
+
+It needs no liquidity gate, unlike `withdraw()` and `borrow()`. Those move deposits
+against a fixed reserve backing, so they must stop at `getAvailableLiquidity`. A reserve
+withdrawal drops the contract's balance and `pool.reserves` by the same amount, so both
+sides of *cash = deposits + reserves − debt* fall together and depositors are untouched.
+
+**DUSD reserves are not withdrawable.** `dusdReserves` is a claim, not a balance:
+`borrowDUSD` mints to the borrower and `repayDUSD` burns from the payer, so the protocol
+never holds DUSD. Paying it out would mean minting unbacked supply. See
+[[0005-treasury-withdrawal]].
 
 ## Rounding policy
 

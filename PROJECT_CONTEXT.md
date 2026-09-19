@@ -94,8 +94,13 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - `Ownable` (added with the cross-chain work; previously there was no access control at
   all). Owner-only: `setAdapter`, `setAllowedDestination(eid, bool)`,
   `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS).
-- No admin/treasury withdrawal yet; `pool.reserves` and `dusdReserves` just accumulate.
-  Token add/remove is still ungoverned.
+- `withdrawReserves(token, to, amount)` (owner-only) pays out a pool's accumulated revenue —
+  the RESERVE_FACTOR interest cut plus LIQ_PROTOCOL_SHARE of liquidation bonuses. It accrues
+  first and needs no liquidity gate: the balance and `pool.reserves` fall by the same amount,
+  so the custody identity holds by construction. `dusdReserves` is deliberately NOT
+  withdrawable — it is a claim, not a balance (DUSD is minted to borrowers and burned from
+  payers, never held here), so paying it out would mint unbacked supply. See ADR 0005.
+- Token add/remove is still ungoverned.
 
 ### `src/PositionNFT.sol` — `Position` ERC721
 - Token id = position id; minted by Desultory (`deposit(0, …)`). The NFT IS

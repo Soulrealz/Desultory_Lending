@@ -241,6 +241,26 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         }
     }
 
+    /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is
+    /// pranked as the deployer; the ghosts must see it or property_tokenConservation
+    /// breaks the first time the fuzzer calls it.
+    function desultory_withdrawReserves(uint8 tokenSeed, uint256 amount) public updateGhosts {
+        MockERC20 token = _getToken(tokenSeed);
+        uint256 slot = _tokenSlot(tokenSeed);
+
+        uint256 reserves = desultory.getPoolInfo(address(token)).reserves;
+        precondition(reserves > 0);
+
+        uint256 cash = token.balanceOf(address(desultory));
+        precondition(cash > 0);
+
+        amount = between(amount, 1, reserves < cash ? reserves : cash);
+
+        vm.prank(desultory.owner());
+        desultory.withdrawReserves(address(token), address(this), amount);
+        ghostPaidOut[slot] += amount;
+    }
+
     function warp(uint32 secs) public updateGhosts {
         uint256 jump = between(uint256(secs), 1, MAX_WARP);
         vm.warp(block.timestamp + jump);
