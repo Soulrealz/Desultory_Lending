@@ -948,6 +948,96 @@ contract DesultoryTest is Test {
         assertGe(desultory.getPoolInfo(weth).reserves, reservesBefore, "reserves must not have been spent");
     }
 
+    /// @dev drive a backstop commit, then hand back how much is committed in token units
+    function _commitViaLiquidation() internal returns (uint256 committed) {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        vm.prank(who);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        committed = pool.backstopScaledDeposits * pool.liquidityIndex / 1e18;
+        assertGt(committed, 0, "fixture must have committed something");
+    }
+
+    function testReleaseBackstopIsBlockedWhileThePoolIsStillSaturated() public {
+        uint256 committed = _commitViaLiquidation();
+
+        vm.prank(desultory.owner());
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__InsufficientLiquidity.selector, usdc));
+        desultory.releaseBackstop(usdc, committed);
+    }
+
+    function testReleaseBackstopSucceedsOnceLiquidityReturns() public {
+        uint256 committed = _commitViaLiquidation();
+
+        // bob repays his USDC debt, freeing the pool
+        vm.prank(bob);
+        desultory.repay(2, usdc, 150_000e18);
+
+        uint256 reservesBefore = desultory.getPoolInfo(usdc).reserves;
+
+        // type(uint256).max, not `committed`: bob's repay accrued the pool, so the backstop
+        // deposit has grown past the figure snapshotted in the fixture. The full-balance
+        // shortcut is the only way to land on exactly zero.
+        vm.prank(desultory.owner());
+        desultory.releaseBackstop(usdc, type(uint256).max);
+
+        assertEq(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "backstop fully released");
+        assertGt(desultory.getPoolInfo(usdc).reserves, reservesBefore, "released into reserves");
+    }
+
+    function testReleaseBackstopMovesNoTokens() public {
+        uint256 committed = _commitViaLiquidation();
+
+        vm.prank(bob);
+        desultory.repay(2, usdc, 150_000e18);
+
+        uint256 balanceBefore = MockERC20(usdc).balanceOf(address(desultory));
+
+        vm.prank(desultory.owner());
+        desultory.releaseBackstop(usdc, committed);
+
+        assertEq(
+            MockERC20(usdc).balanceOf(address(desultory)), balanceBefore, "release is bookkeeping, not a transfer"
+        );
+    }
+
+    function testReleasedBackstopExitsThroughWithdrawReserves() public {
+        uint256 committed = _commitViaLiquidation();
+
+        vm.prank(bob);
+        desultory.repay(2, usdc, 150_000e18);
+
+        vm.startPrank(desultory.owner());
+        desultory.releaseBackstop(usdc, type(uint256).max);
+
+        // the committed capital came back with the interest it earned while deposited
+        uint256 reserves = desultory.getPoolInfo(usdc).reserves;
+        assertGe(reserves, committed, "released capital is at least what went in");
+
+        address treasury = makeAddr("treasury");
+        desultory.withdrawReserves(usdc, treasury, committed);
+        vm.stopPrank();
+
+        assertEq(MockERC20(usdc).balanceOf(treasury), committed, "the one exit still works");
+    }
+
+    function testReleaseBackstopIsOwnerGated() public {
+        uint256 committed = _commitViaLiquidation();
+
+        vm.prank(alice);
+        vm.expectRevert();
+        desultory.releaseBackstop(usdc, committed);
+    }
+
+    function testReleaseBackstopRejectsAnEmptyBackstop() public {
+        vm.prank(desultory.owner());
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.releaseBackstop(usdc, 1e18);
+    }
+
     function testHealthyPositionCannotBeLiquidated() public {
         vm.prank(alice);
         desultory.deposit(0, weth, 10e18);

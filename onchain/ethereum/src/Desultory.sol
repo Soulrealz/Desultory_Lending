@@ -341,6 +341,62 @@ contract Desultory is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev return committed backstop capital to the pool's reserves.
+     *
+     * The reverse of _commitBackstop, and it moves no tokens either. Cash leaves the
+     * contract only through withdrawReserves, so there stays exactly one door out and its
+     * custody argument is unchanged. Interest the backstop deposit earned through
+     * liquidityIndex is realized into reserves on the way through.
+     *
+     * Unlike withdrawReserves this DOES need a liquidity gate: it lowers deposits against a
+     * fixed reserve backing, exactly as withdraw() does, rather than moving both lines
+     * together. Same gate, same reason.
+     *
+     * The shape deliberately mirrors withdraw() — full-balance shortcut, __toScaledUp for
+     * the partial case so the protocol gives up at least the scaled amount it redeems,
+     * clamp, then the gate — so the two read as the same operation.
+     */
+    function releaseBackstop(address token, uint256 amount)
+        external
+        onlyOwner
+        moreThanZero(amount)
+        isAllowedToken(token)
+    {
+        // the backstop deposit grows with the index; reading it first would release a
+        // stale figure and strand the interest it earned
+        accrue(token);
+
+        Pool storage pool = __pools[token];
+
+        uint256 scaledBalance = pool.backstopScaledDeposits;
+        uint256 balance = __fromScaledDown(scaledBalance, pool.liquidityIndex);
+        if (balance == 0) {
+            revert Desultory__ZeroAmount();
+        }
+
+        uint256 scaledAmount;
+        if (amount >= balance) {
+            amount = balance;
+            scaledAmount = scaledBalance;
+        } else {
+            scaledAmount = __toScaledUp(amount, pool.liquidityIndex);
+            if (scaledAmount > scaledBalance) {
+                scaledAmount = scaledBalance;
+            }
+        }
+
+        if (amount > getAvailableLiquidity(token)) {
+            revert Desultory__InsufficientLiquidity(token);
+        }
+
+        pool.backstopScaledDeposits = scaledBalance - scaledAmount;
+        pool.totalScaledDeposits -= scaledAmount;
+        pool.reserves += amount;
+
+        emit BackstopReleased(token, amount);
+    }
+
+    /**
      * @dev annual DUSD stability fee in BPS. Flat, not a utilization curve: nobody
      * deposits DUSD, so utilization would be permanently zero and the kinked model
      * would return the base rate no matter how much is outstanding.
