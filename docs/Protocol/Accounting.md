@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 99bccc7
+verified-against: 7f90054
 ---
 
 # Accounting
@@ -22,6 +22,7 @@ struct Pool {
     uint256 liquidityIndex;      // starts at WAD, grows with lender yield
     uint256 borrowIndex;         // starts at WAD, grows with the borrow rate
     uint256 totalScaledDeposits;
+    uint256 backstopScaledDeposits;  // the protocol's own deposit, a SUBSET of the line above
     uint256 totalScaledBorrows;
     uint256 reserves;            // protocol cut, in token units
     uint40  lastUpdate;
@@ -73,13 +74,36 @@ Ten percent of accrued interest goes to `pool.reserves`; the remaining 90% grows
 pot: the whole DUSD stability fee (see [[Cross-Chain]]) and `LIQ_PROTOCOL_SHARE` — 30% —
 of every liquidation bonus (see [[Liquidations]]).
 
+`pool.reserves` now has two outlets and two inlets.
+
 `withdrawReserves(token, to, amount)` pays a pool's reserves out to the owner's chosen
-recipient. It accrues first, so the figure it reads is settled rather than stale.
+recipient. It accrues first, so the figure it reads is settled rather than stale. It is
+the **only** path by which cash leaves the contract as revenue.
 
 It needs no liquidity gate, unlike `withdraw()` and `borrow()`. Those move deposits
 against a fixed reserve backing, so they must stop at `getAvailableLiquidity`. A reserve
 withdrawal drops the contract's balance and `pool.reserves` by the same amount, so both
 sides of *cash = deposits + reserves − debt* fall together and depositors are untouched.
+
+`_commitBackstop(token, want)` is the second outlet, and it moves no tokens. It converts
+reserves into `pool.backstopScaledDeposits` — the protocol's own deposit, credited to
+`totalScaledDeposits` alongside every lender's — so a backstopped liquidation can seize
+against cash the availability view does not report. Only the split between "protocol
+revenue" and "deposit base" changes, so the identity again holds by construction. The
+credit rounds down per the policy below, and reserves fall by the exact round-trip of the
+scaled figure so no dust drifts between the two lines. See [[Liquidations]].
+
+`releaseBackstop(token, amount)` is the inlet on the same line: owner-gated, it accrues,
+converts the protocol's deposit back into `pool.reserves` with the interest it earned, and
+moves no tokens. Unlike `withdrawReserves` it **does** gate on `getAvailableLiquidity`,
+because it lowers deposits against a fixed reserve backing exactly as `withdraw()` does.
+
+Why the availability view needs the backstop at all: `getAvailableLiquidity` is
+`max(0, deposits - debt)`, which by the identity above is `max(0, cash - reserves)`. It
+therefore under-reports spendable cash by exactly `min(reserves, cash)` — and because
+`borrowIndex` outgrows `liquidityIndex` by the reserve cut on every accrual, a pool
+routinely sits with deposits below debt and reports zero available while holding real
+cash.
 
 **DUSD reserves are not withdrawable.** `dusdReserves` is a claim, not a balance:
 `borrowDUSD` mints to the borrower and `repayDUSD` burns from the payer, so the protocol
@@ -146,3 +170,5 @@ That is what `Desultory__InsufficientLiquidity` means.
 - [[Interest-Rate-Model]] — where the rate that drives `borrowIndex` comes from
 - [[Positions]] — what a `positionId` is and who is allowed to use one
 - [[Oracles]] — how balances become USD for the health check
+- [[Liquidations]] — the backstop that commits reserves as a deposit, and releases them back
+- [[0006-internal-liquidation-backstop]] — why reserves are converted rather than spent

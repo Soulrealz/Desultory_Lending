@@ -22,17 +22,19 @@ Desultory_Lending/
 │   │   ├── Interest-Rate-Model.md  # 4-bracket kinked borrow curve, per-token multiplier
 │   │   ├── Positions.md        # NFT-as-position semantics, authorization, transfer health gate
 │   │   ├── Oracles.md          # Chainlink wrapper, staleness window, decimal normalization
-│   │   ├── Liquidations.md     # The single-entry-point liquidation engine: health factor, close factor, bonus, clamp-and-count
+│   │   ├── Liquidations.md     # The liquidation engine: health factor, close factor, bonus, clamp-and-count, internal backstop
 │   │   └── Cross-Chain.md      # DUSD-only remote borrowing over LayerZero V2; DUSD debt accounting
 │   ├── Decisions/              # MAINTAINED: numbered ADRs, superseded rather than edited
 │   │   ├── Decisions.md        # Zone index and status conventions
 │   │   ├── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
 │   │   ├── 0002-internal-consistency-invariants.md  # ADR: fuzz internal consistency, not solvency (superseded-by 0004 on the solvency point)
 │   │   ├── 0003-dusd-only-cross-chain-borrowing.md  # ADR: only DUSD crosses chains; one home chain per position
-│   │   └── 0004-liquidation-engine.md  # ADR: single-entry-point liquidation, clamp-and-count bad debt
+│   │   ├── 0004-liquidation-engine.md  # ADR: single-entry-point liquidation, clamp-and-count bad debt
+│   │   ├── 0005-treasury-withdrawal.md  # ADR: token reserves are withdrawable, DUSD reserves are not
+│   │   └── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
-│   │   ├── Invariants.md       # The eleven fuzzing invariants in prose, and what they found
+│   │   ├── Invariants.md       # The twelve fuzzing invariants in prose, and what they found
 │   │   └── 2026-06-10-project-assessment.md  # State-of-the-project audit
 │   └── Notes/                  # NOT maintained: research and scratch thinking
 │       ├── Notes.md            # Zone index

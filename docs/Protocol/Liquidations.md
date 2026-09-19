@@ -1,17 +1,33 @@
 ---
 status: current
-verified-against: 75a675f
+verified-against: 7f90054
 ---
 
 # Liquidations
 
 The old dual-entry-point engine (`liquidateAssetPosition`/`liquidateProportionalPosition`,
 all seven defects catalogued below under "History") has been replaced. The current
-engine is a single external function:
+engine is a single private implementation behind two external entry points:
 
 ```solidity
 liquidate(uint256 positionId, address debtAsset, address collateralAsset, uint256 repayAmount)
+liquidateWithBackstop(uint256 positionId, address debtAsset, address collateralAsset, uint256 repayAmount)
 ```
+
+Both are thin wrappers over
+`_liquidate(positionId, debtAsset, collateralAsset, repayAmount, bool useBackstop)`, and
+`useBackstop` changes exactly two things: the seizure cap may draw on protocol reserves
+converted into a protocol-owned deposit (see "Internal backstop" below), and the bonus
+split uses `LIQ_BACKSTOP_SHARE` (70% to the protocol) instead of `LIQ_PROTOCOL_SHARE`
+(30%) — the protocol keeps more because it is now the one carrying the pool's liquidity
+risk. `nonReentrant` sits on the two wrappers and never on `_liquidate`, so they cannot be
+composed into a re-entrant path.
+
+A liquidator must pick the backstop entry point deliberately; `liquidate()` never
+escalates into it. Nobody who quoted their profit off the ordinary 30% split is silently
+paid the 70% one. The larger share comes out of the **liquidator's** bonus and is never
+charged to the position: the borrower gives up the same seizure either way, so
+`seizeFromRepay`, `healthFactor` and the close factor are all untouched.
 
 ## Flow
 
@@ -38,7 +54,7 @@ liquidate(uint256 positionId, address debtAsset, address collateralAsset, uint25
    just harder to see, because both sides are still denominated correctly.
 6. **Bonus split**: `LiquidationMath.splitBonus` divides the seize amount between the
    liquidator and the protocol (`LIQ_PROTOCOL_SHARE`, 30% of the bonus lands in
-   `pool.reserves`).
+   `pool.reserves` — or `LIQ_BACKSTOP_SHARE`, 70%, on the backstop path).
 7. **Effects**: `_seizeCollateral` removes the seized collateral and books the protocol
    cut; `_retireDebt` reduces the position's debt by exactly `repayAmount`.
 8. **Interaction**: `safeTransfer` sends the liquidator's share of seized collateral
@@ -65,12 +81,17 @@ sequenceDiagram
     M-->>D: clamp repayAmount <= debt * factor
     D->>M: seizeFromRepay(repayAmountUSD)
     M-->>D: seizeAmount (bonus included)
-    D->>D: clamp seizeAmount to min(held, getAvailableLiquidity)
+    D->>D: seizeCap = min(held, seizeAmount)
+    opt useBackstop
+        D->>D: _commitBackstop(collateralAsset, seizeCap)
+        Note over D: reserves -> backstopScaledDeposits<br/>no token moves
+    end
+    D->>D: read getAvailableLiquidity fresh, clamp seizeCap to it
     alt clamp bit
         D->>M: repayFromSeize(cappedSeize)
         M-->>D: repayAmount recomputed downward
     end
-    D->>M: splitBonus(seizeAmount)
+    D->>M: splitBonus(seizeAmount, LIQ_PROTOCOL_SHARE or LIQ_BACKSTOP_SHARE)
     M-->>D: liquidatorShare, protocolCut
     L->>DUSD: pays repayAmount (burn if DUSD, else transferFrom)
     D->>D: _seizeCollateral (protocolCut -> pool.reserves)
@@ -80,6 +101,83 @@ sequenceDiagram
         D->>D: _recordBadDebtIfStranded -> totalBadDebtUSD += remaining debt
     end
 ```
+
+## Internal backstop
+
+`getAvailableLiquidity(token)` returns `max(0, deposits - debt)`. Substituting the custody
+identity `cash = deposits + reserves - debt` gives `available = max(0, cash - reserves)`:
+the figure the seizure clamps against under-reports the pool's real spendable cash by
+exactly `min(reserves, cash)`, and that quantity is the backstop's entire budget.
+
+A pool whose deposits sit below its debt reports zero available while still holding real
+cash, and that is the **normal** post-accrual state — `borrowIndex` grows faster than
+`liquidityIndex` by exactly the reserve cut on every accrual (see [[Accounting]]). The
+pool does not have to be drained for this to bite.
+
+`_commitBackstop(token, want)` converts reserves into a protocol-owned deposit so a
+seizure of up to `want` can proceed:
+
+1. Read `deposits` and `debt` from the **raw** scaled figures (`__fromScaledDown` on
+   deposits, `__fromScaledUp` on borrows) — deliberately not `getAvailableLiquidity`,
+   which is already clamped to zero in exactly this state and would under-commit by the
+   whole deficit, leaving the backstop to do nothing.
+2. `need = (debt + want) - deposits`, returning early if deposits already cover it, then
+   clamped to `pool.reserves` when reserves cannot cover the full shortfall.
+3. Convert `need` to a scaled credit rounding **down**, the direction `deposit()` uses, so
+   the protocol never receives more deposit claim than it paid for. Decrement
+   `pool.reserves` by the exact round-trip of that scaled figure rather than by `need`, so
+   no dust drifts between the two lines, and credit both `pool.backstopScaledDeposits` and
+   `pool.totalScaledDeposits`. Emits `BackstopCommitted(token, committed)`.
+
+**No token moves.** Reserves were already cash sitting in the contract; only the split
+between "protocol revenue" and "deposit base" changes, so both sides of
+`cash = deposits + reserves - debt` move together and `property_custodyReconciles` is
+preserved by construction rather than by a check — the same argument
+[[0005-treasury-withdrawal]] makes for `withdrawReserves`.
+
+Ordering inside `_liquidate` matters twice. The commit runs **after** `seizeCap` is
+clamped to both the position's actual collateral and the requested seize amount, so
+nothing is committed when collateral rather than liquidity is what binds — reserves spent
+to unlock liquidity for collateral that is not there would be pure waste. It runs
+**before** `getAvailableLiquidity` is read for the final clamp, and that availability is
+re-read fresh rather than incremented by an assumed amount, because the down-rounded
+credit can land a wei short of what was asked for. A pool with no reserves commits
+nothing and `liquidateWithBackstop` then behaves exactly like `liquidate()`, including
+the same `Desultory__ZeroAmount` revert on a zero fill.
+
+`pool.backstopScaledDeposits` is a **subset** of `pool.totalScaledDeposits`, never a
+parallel figure. It is deliberately not a position, so `withdraw()` — which keys off
+`__scaledDeposits[positionId][token]` behind `onlyPositionOwner` — cannot reach protocol
+capital.
+
+### Releasing it
+
+`releaseBackstop(token, amount)` is owner-gated and is the mirror. It accrues first, so
+the interest the deposit earned through `liquidityIndex` is realized rather than
+stranded; mirrors `withdraw()`'s shape exactly (full-balance shortcut, `__toScaledUp` for
+the partial case, clamp, then the gate); and converts the deposit back into
+`pool.reserves`. It emits `BackstopReleased(token, amount)` and moves no tokens either, so
+cash still leaves the contract through exactly one door — the pre-existing
+`withdrawReserves`.
+
+It gates on `getAvailableLiquidity` precisely where `withdrawReserves` does not, and the
+asymmetry is the point. `withdrawReserves` lowers the balance and `pool.reserves`
+together, so custody holds by construction. `releaseBackstop` lowers deposits against a
+fixed reserve backing — exactly what `withdraw()` does — so it gets exactly the gate
+`withdraw()` gets.
+
+### What it costs
+
+The protocol becomes a lender in a pool it cannot withdraw from until utilization falls.
+That liquidity risk is the real cost of the backstop and is what the larger bonus share
+pays for. The capital is not lost — it earns the index like any other deposit — but it is
+illiquid, and a pool that stays saturated keeps it illiquid indefinitely.
+
+The liquidator still clears a profit, which is what makes the path usable at all: at
+`LIQ_BACKSTOP_SHARE` (7000bps of the bonus to the protocol) the liquidator keeps 30% of
+the bonus, so against WETH's 1000bps bonus that is about +3%, and against USDC's 500bps
+about +1.5%. Thin, deliberately — this is a last resort, not the default trade. See
+[[0006-internal-liquidation-backstop]].
 
 ## Bad debt: counted, never socialized
 
@@ -104,15 +202,24 @@ etc.) is out of scope for this project.
   the liquidator's payment is taken via `_retireDebt`, never a balance-sniff-then-fallback.
 - **Bad debt** — recognized and counted (`totalBadDebtUSD`), never socialized onto
   lenders via the index.
+- **Internal backstop** — `liquidateWithBackstop` as a separate, opt-in entry point;
+  reserves converted into a protocol-owned deposit rather than spent; the larger
+  `LIQ_BACKSTOP_SHARE` taken out of the liquidator's bonus rather than charged to the
+  position; `releaseBackstop` returning capital to reserves so `withdrawReserves` stays
+  the single exit. See [[0006-internal-liquidation-backstop]].
 - **Cross-chain** — **still unsettled.** Liquidation is single-chain only; a position
   whose collateral and debt sit on different chains has no engine yet. See [[Cross-Chain]].
 
 ## Known limitations
 
-- **Payout can revert in a cash-poor pool.** Collateral leaves the contract's own
-  balance via `safeTransfer`, with no flash-loan funding and no protocol-funded
-  fallback (D2's gap). If the collateral pool is fully lent out, `liquidate()` can
-  fail even against a genuinely liquidatable position.
+- **A cash-poor pool can still fail a liquidation — now only when it is genuinely
+  cash-poor.** The old framing of this limitation said `safeTransfer` reverts. It does
+  not get that far: the availability clamp bites first, `repayAmount` is back-solved down
+  from the tighter cap, and the call reverts with `Desultory__ZeroAmount`. The failure is
+  a **zero fill**, not a failed transfer. `liquidateWithBackstop` (above) closes the case
+  where the pool holds real cash that `getAvailableLiquidity` simply does not report. It
+  does nothing for a pool with no reserves and no spare liquidity — that needs outside
+  capital, which is the external (flash-loan) half of D2 and has no spec yet.
 - **`totalBadDebtUSD` is a snapshot, not a live mark.** It is credited once, in USD, at
   the moment a position's collateral hits zero across every asset. It is never
   decremented, and it does not track price movement afterward — a later price recovery
@@ -137,13 +244,29 @@ etc.) is out of scope for this project.
   documented in [[Accounting]]. See
   `test/Desultory.t.sol:testSeizureIsBoundedByAvailableLiquidity` and
   `.superpowers/sdd/2026-09-12-liquidation-engine/task-7-report.md`.
-- **A wei-scale rounding seam remains, deliberately unfixed.** The availability bound
-  above is computed in token units, but `_seizeCollateral` converts the decrement with
-  `__toScaledUp` (rounds up), so a seizure that exactly saturates the cap can leave a
-  pool's deposits 1–2 wei below its debt. This cannot trigger the invariant that caught
-  the bug above — that needs roughly a 10% deficit, not a couple of wei — and was
-  parked rather than patched with an unexplained `-1` safety margin. Invisible to every
-  existing invariant; economically meaningless; real.
+- **A wei-scale rounding seam remains, deliberately unfixed — and the backstop widens
+  it.** The availability bound above is computed in token units, but `_seizeCollateral`
+  converts the decrement with `__toScaledUp` (rounds up), so a seizure that exactly
+  saturates the cap can leave a pool's deposits 1–2 wei below its debt. It was parked
+  rather than patched with an unexplained `-1` safety margin.
+
+  The design spec for the backstop claimed it *inherits, does not widen* this seam. **That
+  claim was wrong.** On the ordinary path the cap binds only sometimes, and binds exactly
+  only rarely. On the backstop path `seizeCap` is set to precisely the availability the
+  commit just unlocked, so the precondition holds on **every** call — what is an edge case
+  on the ordinary path is routine here. `_commitBackstop`'s own down-rounding adds a
+  second floor in the same direction, bounded by `liquidityIndex / WAD`. Observed in
+  testing: a deterministic **2-wei shortfall** against a ~449,740-token pool.
+
+  It is still not worth patching, and nothing it can reach cares.
+  `property_borrowIndexOutpacesLiquidityIndex` needs roughly a 10% deficit, not a couple
+  of wei. `property_utilizationNeverExceeds100` holds because `getUtilization` clamps at
+  `MAX_BPS`. `property_custodyReconciles` is a `gte` whose right-hand side the shortfall
+  moves *down*, so the rounding runs in the property's favour. Accordingly
+  `test/Desultory.t.sol:testBackstopLeavesDepositsCoveringDebtWithinRoundingDust` asserts
+  the shortfall is dust (≤ 10 wei) rather than zero, and says why. Invisible to every
+  existing invariant; economically meaningless; real; and routine rather than rare on one
+  of the two paths.
 
 ## History: the seven defects of the old engine
 
@@ -173,4 +296,8 @@ invariants the rewrite had to hold.
 - [[Positions]] — `healthFactor`, the threshold/LTV split, and the transfer gate
 - [[Cross-Chain]] — why liquidation is still single-chain only
 - [[0004-liquidation-engine]] — the ADR recording why the engine was built this way
+- [[0006-internal-liquidation-backstop]] — the ADR recording the backstop, and correcting
+  0004's framing of the cash-poor failure and of the rounding seam
+- [[0005-treasury-withdrawal]] — `withdrawReserves`, the single exit the release path keeps
+- [[Invariants]] — the properties the backstop had to keep, including the new property 12
 - [[2026-06-10-project-assessment]] — the audit that first catalogued the seven defects

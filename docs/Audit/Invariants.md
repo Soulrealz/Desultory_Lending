@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 75a675f
+verified-against: 7f90054
 ---
 
 # Invariants
@@ -11,19 +11,26 @@ in a sentence is an invariant nobody can review.
 Implementation lives in `onchain/ethereum/test/recon/Properties.sol`. The reasoning
 behind this particular set is [[0002-internal-consistency-invariants]].
 
-All eleven are **internal-consistency** properties: they constrain the bookkeeping, not
+All twelve are **internal-consistency** properties: they constrain the bookkeeping, not
 the economics. Each holds even when the protocol is underwater, which is what allows
 the fuzzer to move oracle prices between 0.01× and 100× of their starting value
 without generating false alarms.
 
-## The eleven
+## The twelve
 
 **1. Scaled balances reconcile.**
-For each token, the per-position scaled deposits sum to `pool.totalScaledDeposits`,
-and the scaled borrows sum to `pool.totalScaledBorrows`. Exact equality — these are
-raw stored integers and nothing rounds during the summation, so any drift at all is a
-real bookkeeping bug. This is the one that catches a botched storage migration, which
-is the most likely way the cross-chain work breaks accounting silently.
+For each token, the per-position scaled deposits **plus `pool.backstopScaledDeposits`**
+sum to `pool.totalScaledDeposits`, and the scaled borrows sum to
+`pool.totalScaledBorrows`. Exact equality — these are raw stored integers and nothing
+rounds during the summation, so any drift at all is a real bookkeeping bug. This is the
+one that catches a botched storage migration, which is the most likely way the
+cross-chain work breaks accounting silently.
+
+The backstop term arrived with [[0006-internal-liquidation-backstop]], which gave the
+protocol its own deposit line funded out of reserves. It is a *strengthening*, not a
+loosened bound: the equality is still exact, with one more known term on the left rather
+than a tolerance on the right. A backstop commit that credited `totalScaledDeposits`
+without crediting `backstopScaledDeposits`, or vice versa, breaks this immediately.
 
 **2. Indexes never decrease.**
 `liquidityIndex` and `borrowIndex` are monotonically non-decreasing across every call.
@@ -85,10 +92,22 @@ the latter would be a stronger, different claim this harness does not need.
 Checked directly against `LiquidationMath.seizeFromRepay` / `splitBonus` rather than
 through a full `liquidate()` call: for a fixed repay amount, the liquidator's share of
 the seized collateral (after the protocol's cut) must be worth at least what they paid.
+Asserted at **both** bonus shares — 3000 (`liquidate`) and 7000
+(`liquidateWithBackstop`) — since the backstop path pays the liquidator a thinner slice
+and it must still be a slice worth taking.
+
 This is deliberately *not* "liquidation improves the health factor" — that claim is
 false by design, since seizing collateral plus a bonus removes more value than the debt
 it retires, so a deeply underwater position gets worse, not better, with every
 liquidation. Asserting it would be asserting a bug that isn't one.
+
+**12. The backstop never exceeds the pool's deposits.**
+Per token, `pool.backstopScaledDeposits <= pool.totalScaledDeposits`. The protocol's own
+deposit line is a *subset* of the pool's deposit base, never a parallel figure, and this
+states that relation on its own rather than leaving it implied by invariant 1. It catches
+the class of slip where a commit or a release moves one line and not the other — which
+invariant 1 would also catch, but only while every position in the harness is enumerable;
+this one holds regardless.
 
 ## Deliberately not asserted
 
@@ -145,12 +164,29 @@ can leave a pool's deposits 1–2 wei below its debt. It cannot trigger invarian
 (which needs roughly a 10% deficit) and is recorded as a known limitation in
 [[Liquidations]] rather than fixed with an unexplained `-1`.
 
+**The backstop widened that seam, and the docs were corrected rather than the code.**
+`liquidateWithBackstop` sets the seizure cap to precisely the availability the commit
+just unlocked, so the "exactly saturates the cap" precondition holds on *every* call on
+that path rather than occasionally — and `_commitBackstop`'s own down-rounding adds a
+second floor in the same direction. A deterministic 2-wei shortfall was observed against
+a ~449,740-token pool. None of the properties here can see it: invariant 3 needs a ~10%
+deficit, invariant 5 holds because `getUtilization` clamps at `MAX_BPS`, and invariant 4
+is a `gte` whose right-hand side the shortfall moves *down*, so the rounding runs in the
+property's favour. The unit test
+`testBackstopLeavesDepositsCoveringDebtWithinRoundingDust` therefore asserts the
+shortfall is dust (≤ 10 wei) rather than zero, and says why. See
+[[0006-internal-liquidation-backstop]].
+
 ## Running them
 
 ```
-medusa fuzz
-echidna . --contract CryticTester --config echidna.yaml
+medusa fuzz --test-limit 50000
+echidna . --contract CryticTester --config echidna.yaml --test-limit 30000
 ```
+
+Currently Medusa 24/24 and Echidna 25/25 green, up from 21/21 and 22/22. Each tool counts
+the two new target functions (`desultory_liquidateWithBackstop`,
+`desultory_releaseBackstop`) alongside the new property, which is why both rose by three.
 
 Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 
@@ -159,4 +195,6 @@ Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 - [[Accounting]] — the accrual math these constrain
 - [[Cross-Chain]] — the DUSD debt accounting invariants 7 and 8 constrain
 - [[0002-internal-consistency-invariants]] — why this set and not another
-- [[Liquidations]] — the surface invariants 9-11 constrain
+- [[Liquidations]] — the surface invariants 9-12 constrain
+- [[0006-internal-liquidation-backstop]] — the backstop that added invariant 12 and a
+  second term to invariant 1

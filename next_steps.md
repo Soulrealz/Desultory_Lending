@@ -1,29 +1,34 @@
 # Next Steps
 
 Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module map and
-`docs/` for the vault. Written 2026-09-19, last updated against commit `422dd17` on `master`.
+`docs/` for the vault. Written 2026-09-19, last updated against commit `7f90054` on `d2-internal-backstop`.
 
 ## START HERE
 
-**Brainstorm D2's internal liquidation backstop.** That is the next piece of work, and it
-has not been started — no spec, no plan, no code.
+**Brainstorm D2's external liquidation backstop** — flash-loaning the shortfall from an
+outside venue (Uniswap, Aave) to cover a liquidation. That is the next piece of work, and
+it has not been started — no spec, no plan, no code.
+
+The **internal** half is done and merged (ADR 0006). The protocol can now fund a seizure
+from its own reserves when the pool reports no available liquidity but is in fact holding
+cash. What it still cannot do is fund one when the pool holds nothing — that needs
+outside capital, and that is this piece.
 
 Invoke `superpowers:brainstorming` with it. Classify it **architectural**, not bounded: it
-changes how liquidation, reserve accounting and the custody invariant fit together, so it
-gets the full path — questions, approaches, a sectioned design, a written spec, then
-`superpowers:writing-plans`.
+adds the protocol's first real external integration, with an untrusted venue in the middle
+of a liquidation, so it gets the full path — questions, approaches, a sectioned design, a
+written spec, then `superpowers:writing-plans`.
 
-Read `## Do this next` below before asking the first question. It lists the five things
-the design has to settle and the reasoning behind picking this over C2, D3 and governance.
-Skim `docs/Protocol/Liquidations.md` and `docs/Decisions/0004-liquidation-engine.md` too —
-the backstop exists to close a gap those two document, and arriving without that context
-wastes the first few questions.
+Read `## Do this next` below before asking the first question. Skim
+`docs/Protocol/Liquidations.md` (the "Internal backstop" section and Known limitations) and
+`docs/Decisions/0006-internal-liquidation-backstop.md` first — the external half sits on
+top of the internal one, and arriving without that context wastes the first few questions.
 
 Spec and plan paths follow the user's global convention:
 
 ```
-docs/superpowers/specs/liquidations/<Month_YYYY>/YYYY-MM-DD-internal-backstop-design.md
-docs/superpowers/plans/liquidations/<Month_YYYY>/YYYY-MM-DD-internal-backstop.md
+docs/superpowers/specs/liquidations/<Month_YYYY>/YYYY-MM-DD-external-backstop-design.md
+docs/superpowers/plans/liquidations/<Month_YYYY>/YYYY-MM-DD-external-backstop.md
 ```
 
 Note `docs/superpowers/` is gitignored, so those two files live on disk but are never
@@ -45,52 +50,54 @@ projects were planned; all four are now merged:
 | C | Cross-chain DUSD borrowing over LayerZero V2 | done |
 | D1 | Liquidation engine rewrite | done — merged 2026-09-13 |
 | D2.1 | Treasury slice: owner-gated reserve withdrawal | done — merged 2026-09-19 |
+| D2.2 | Internal liquidation backstop (reserves fund the seizure) | done — merged 2026-09-19 |
+| D2.3 | External liquidation backstop (flash loan) | **next — not started** |
 
 The June 2026 assessment's "suggested order of attack" (`docs/Audit/2026-06-10-project-assessment.md`)
 is fully worked through. What remains are the D follow-ons, the DUSD peg, governance,
 and the admin gap described below.
 
-Baseline: **88 tests passing** across 8 suites. `Desultory` runtime 16,044 bytes
-(limit 24,576). Medusa 21/21 and Echidna 22/22 green.
+Baseline: **103 tests passing** across 8 suites. `Desultory` runtime 17,080 bytes
+(limit 24,576). Medusa 24/24 and Echidna 25/25 green.
 
-## Do this next: D2's internal backstop
+## Do this next: D2's external backstop
 
 ### Why this and not something else
 
-D1 shipped a documented hole. Liquidation pays the liquidator in underlying tokens, so
-`safeTransfer` reverts when the pool is cash-poor — and seizure is additionally bounded by
-`getAvailableLiquidity`, so it can partially fill or become unavailable outright. That is
-the one scenario where liquidation matters most, and right now it degrades there. Every
-other open limitation is cosmetic next to it. See **Known limitations** in
-`docs/Protocol/Liquidations.md`.
+D1 shipped a documented hole: a liquidation can fail against a genuinely liquidatable
+position because the collateral pool has no liquidity to give up. The internal backstop
+(ADR 0006) closed the half of that hole the protocol could close on its own — reserves
+are now converted into a protocol-owned deposit so a seizure can proceed against cash the
+availability view does not report. That still leaves the case where the pool genuinely
+holds nothing, and no amount of internal bookkeeping fixes it. That case needs outside
+capital.
 
-D2 as the README decomposes it has two halves:
+It is also the last piece of D2, and it is the largest one: the protocol's first real
+external integration. Every other open item (below) is either blocked on a design that
+does not exist yet or is cosmetic next to a liquidation that cannot execute.
 
-- **Internal backstop** — the protocol covers the liquidation from its own funds when it
-  has them, taking a larger share of the reward. **This is the next piece.**
-- **External backstop** — the protocol flash-loans from an outside venue (Uniswap, Aave)
-  to cover, taking a partial reward. Largest piece, real external integrations, worth its
-  own spec.
+### What the external backstop has to settle
 
-The treasury slice that unblocked this is **done** (ADR 0005). `withdrawReserves(token,
-to, amount)` is owner-gated, accrues first, and needs no liquidity gate because the balance
-and `pool.reserves` fall together, so the custody identity holds by construction.
-`dusdReserves` was deliberately left unwithdrawable — it is a claim, not a balance, and
-paying it out would mint unbacked DUSD. That decision is C2's to revisit.
-
-### What the internal backstop has to settle
-
-- Where the covering funds come from. `pool.reserves` is the obvious pot and it is now
-  addressable, but *spending* it inside a liquidation is a different problem from paying
-  it out.
-- What "a larger share of the reward" means numerically, and whether it comes out of the
-  liquidator's bonus or is charged to the position.
-- Whether the backstop fires automatically when `getAvailableLiquidity` binds, or is a
-  separate entry point a caller opts into.
-- What happens when reserves cannot cover it either — presumably the same partial fill D1
-  already does, but it must be stated rather than inherited by accident.
-- Whether `property_custodyReconciles` still holds when reserves are spent rather than
-  withdrawn. It is the invariant governing this area and it must not be weakened.
+- **Which venue, and how it is trusted.** Uniswap V3 flash swaps and Aave V3
+  `flashLoanSimple` have different callback shapes, different fees and different failure
+  modes. The callback re-enters this contract mid-liquidation, which is the whole design
+  problem — note that `nonReentrant` currently sits on the two `liquidate` wrappers and
+  never on `_liquidate`.
+- **Where the borrowed cash lands in the accounting.** The internal backstop moves no
+  tokens, so custody holds by construction. A flash loan really does move tokens in and
+  out inside one call, so `property_custodyReconciles` and `property_tokenConservation`
+  both have something to say about it, and the ghost counters in the harness will need to
+  see the round trip.
+- **What the liquidator is paid.** The internal path inverts the split to
+  `LIQ_BACKSTOP_SHARE` (70% to the protocol) because the protocol carries the liquidity
+  risk. A flash loan carries a fee instead of a risk, so the split is a different
+  question — "a partial reward" in the README is not a number.
+- **Whether it is a third entry point.** The internal one is deliberately opt-in so nobody
+  is silently paid a worse split (ADR 0006, decision 4). The same argument probably
+  applies, but it has to be made rather than assumed.
+- **What happens when the venue reverts or the swap is unprofitable.** The internal path
+  degrades to ordinary `liquidate()` behavior. State the degradation rather than
+  inheriting it by accident.
 
 Brainstorm before coding — this is architectural, not bounded.
 
@@ -181,7 +188,8 @@ Examples from the log: `rewrite the liquidation engine`, `update docs`,
   `Accounting`, `Interest-Rate-Model`, `Positions`, `Oracles`, `Liquidations`, `Cross-Chain`.
 - `docs/Decisions/` — numbered ADRs. `0001` NFT-as-position, `0002` internal-consistency
   invariants (superseded in part by `0004`), `0003` DUSD-only cross-chain borrowing,
-  `0004` liquidation engine, `0005` treasury withdrawal.
-- `docs/Audit/` — `Invariants.md` (the eleven fuzzing properties in prose) and the June
+  `0004` liquidation engine, `0005` treasury withdrawal, `0006` internal liquidation
+  backstop.
+- `docs/Audit/` — `Invariants.md` (the twelve fuzzing properties in prose) and the June
   project assessment.
 - `docs/Notes/` — scratch. Makes no accuracy claim.
