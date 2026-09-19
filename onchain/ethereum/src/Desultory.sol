@@ -986,6 +986,28 @@ contract Desultory is Ownable, ReentrancyGuard {
         _redeem(positionId, collateralAsset, dusdAmount, false);
     }
 
+    /**
+     * @dev redeem against a pool that cannot spare the liquidity, funding it from reserves.
+     *
+     * Identical to redeem() but for two things: the collateral cap may draw on reserves
+     * converted to a protocol-owned deposit (_commitBackstop), and the fee is booked to
+     * pool.reserves rather than left with the position, because the protocol supplied the
+     * liquidity. The redeemer receives the same net amount either way, so the arbitrage
+     * threshold is unchanged at $1 - REDEMPTION_FEE_BPS.
+     *
+     * A separate entry point rather than an automatic fallback, matching
+     * liquidateWithBackstop: the borrower silently loses the fee on this path, so a
+     * redeemer has to choose it rather than be moved onto it.
+     */
+    function redeemWithBackstop(uint256 positionId, address collateralAsset, uint256 dusdAmount)
+        external
+        nonReentrant
+        moreThanZero(dusdAmount)
+        isAllowedToken(collateralAsset)
+    {
+        _redeem(positionId, collateralAsset, dusdAmount, true);
+    }
+
     function _redeem(uint256 positionId, address collateralAsset, uint256 dusdAmount, bool useBackstop)
         private
     {

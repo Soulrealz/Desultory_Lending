@@ -1637,4 +1637,89 @@ contract DesultoryTest is Test {
 
         assertApproxEqAbs(desultory.getPositionDusdDebt(1), 2_000e18, 1e12, "clamped, not reverted");
     }
+
+    /// @dev the USDC pool saturated (zero available liquidity, real reserves) with a
+    /// HEALTHY position holding USDC collateral and owing DUSD, so it is redeemable but
+    /// the pool cannot pay without the backstop.
+    function _saturatedPoolWithRedeemablePosition() internal returns (address who) {
+        MockERC20(usdc).mint(alice, 200_000e18);
+
+        vm.prank(alice);
+        desultory.deposit(0, usdc, 200_000e18); // position 1, alice
+        vm.prank(bob);
+        desultory.deposit(0, weth, 1_000e18); // position 2, bob
+
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 20_000e18); // healthy: $180k capacity against $20k debt
+
+        vm.prank(bob);
+        desultory.borrow(2, usdc, 199_000e18); // drain the USDC pool, leaving 1k of cash
+
+        vm.warp(block.timestamp + 365 days); // interest -> reserves on the next accrual
+
+        // both feeds must be refreshed after the warp or OracleLib's 3h timeout reverts
+        MockV3Aggregator(deploy.getFeedI(1)).updateAnswer(100_000_000); // USDC, $1
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2000e18); // WETH, unchanged
+
+        assertGe(desultory.healthFactor(1), 1e18, "alice must stay healthy");
+
+        // a redeemer holding DUSD
+        who = makeAddr("redeemer");
+        vm.prank(alice);
+        dusd.transfer(who, 10_000e18);
+    }
+
+    function testOrdinaryRedeemCannotFillAgainstASaturatedPool() public {
+        address who = _saturatedPoolWithRedeemablePosition();
+
+        vm.prank(who);
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.redeem(1, usdc, 5_000e18);
+    }
+
+    function testBackstoppedRedeemFillsAgainstASaturatedPool() public {
+        address who = _saturatedPoolWithRedeemablePosition();
+
+        uint256 usdcBefore = MockERC20(usdc).balanceOf(who);
+
+        vm.prank(who);
+        desultory.redeemWithBackstop(1, usdc, 5_000e18);
+
+        assertGt(MockERC20(usdc).balanceOf(who) - usdcBefore, 0, "redeemer was actually paid");
+        assertGt(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "reserves were committed");
+    }
+
+    /// @dev the fee goes to the protocol when the protocol funded the redemption
+    function testBackstoppedRedeemBooksTheFeeToReserves() public {
+        address who = _saturatedPoolWithRedeemablePosition();
+
+        vm.recordLogs();
+        vm.prank(who);
+        desultory.redeemWithBackstop(1, usdc, 5_000e18);
+
+        // pull feeToReserves out of the Redemption event rather than differencing
+        // pool.reserves, which the backstop commit also moves in the same call
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 feeToReserves;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == Desultory.Redemption.selector) {
+                (,, feeToReserves) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+            }
+        }
+        assertGt(feeToReserves, 0, "the protocol takes the fee when it funds the redemption");
+    }
+
+    function testBackstoppedRedeemPreservesCustody() public {
+        address who = _saturatedPoolWithRedeemablePosition();
+
+        vm.prank(who);
+        desultory.redeemWithBackstop(1, usdc, 5_000e18);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        uint256 deposits = pool.totalScaledDeposits * pool.liquidityIndex / 1e18;
+        uint256 debt = (pool.totalScaledBorrows * pool.borrowIndex + 1e18 - 1) / 1e18;
+        uint256 balance = MockERC20(usdc).balanceOf(address(desultory));
+
+        assertGe(balance + debt, deposits + pool.reserves, "custody must still cover obligations");
+    }
 }
