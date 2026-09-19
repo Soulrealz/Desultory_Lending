@@ -605,6 +605,18 @@ contract Desultory is Ownable, ReentrancyGuard {
         // capped figure — charging the original amount for a short delivery is the same
         // class of bug as paying out in the wrong token.
         uint256 seizeCap = getPositionCollateralForToken(positionId, collateralAsset);
+        if (seizeAmount < seizeCap) {
+            seizeCap = seizeAmount;
+        }
+
+        // On the backstop path, give the pool the liquidity first. Sized against seizeCap
+        // rather than seizeAmount so nothing is committed when the position's collateral is
+        // what binds — reserves spent to unlock liquidity for collateral that is not there
+        // would be pure waste. Then read availability fresh: the commit raises deposits, so
+        // a figure taken beforehand is stale by construction.
+        if (useBackstop) {
+            _commitBackstop(collateralAsset, seizeCap);
+        }
         {
             uint256 availableLiquidity = getAvailableLiquidity(collateralAsset);
             if (availableLiquidity < seizeCap) {
@@ -673,6 +685,62 @@ contract Desultory is Ownable, ReentrancyGuard {
         __scaledDeposits[positionId][collateralAsset] -= scaled;
         pool.totalScaledDeposits -= scaled;
         pool.reserves += protocolCut;
+    }
+
+    /**
+     * @dev convert protocol reserves into a protocol-owned deposit so a seizure of up to
+     * `want` can proceed without leaving the pool's deposits below its debt.
+     *
+     * No token moves: reserves are already cash sitting in this contract. Only the split
+     * between "protocol revenue" and "deposit base" changes, so the balance is untouched
+     * and both sides of cash = deposits + reserves - debt fall together —
+     * property_custodyReconciles is preserved by construction, not by a check, the same
+     * argument withdrawReserves makes.
+     *
+     * The protocol becomes a lender in a pool it cannot withdraw from until utilization
+     * falls. That liquidity risk is the real cost of the backstop, and it is what
+     * LIQ_BACKSTOP_SHARE pays for.
+     */
+    function _commitBackstop(address token, uint256 want) private {
+        Pool storage pool = __pools[token];
+
+        uint256 deposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
+        uint256 debt = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex);
+
+        // deposits + X must cover debt + want, so the seizure leaves deposits >= debt.
+        //
+        // Sized against the raw figures rather than getAvailableLiquidity, deliberately.
+        // That view clamps a deposits-below-debt pool to zero, and a pool sits in exactly
+        // that state after any accrual — borrowIndex grows faster than liquidityIndex by
+        // the reserve cut, every time. Sizing from the clamped view would under-commit by
+        // that whole deficit and the backstop would silently do nothing.
+        uint256 need = debt + want;
+        if (need <= deposits) {
+            return;
+        }
+        need -= deposits;
+
+        if (need > pool.reserves) {
+            need = pool.reserves;
+        }
+
+        // the scaled credit rounds DOWN, the same direction deposit() uses: the protocol
+        // never receives more deposit claim than it paid for
+        uint256 scaled = __toScaledDown(need, pool.liquidityIndex);
+        if (scaled == 0) {
+            return;
+        }
+
+        // decrement reserves by the exact round-trip of that scaled figure rather than by
+        // `need`, so no dust drifts between the two lines — the truncated remainder simply
+        // stays in reserves. committed <= need <= pool.reserves, so this cannot underflow.
+        uint256 committed = __fromScaledDown(scaled, pool.liquidityIndex);
+
+        pool.reserves -= committed;
+        pool.backstopScaledDeposits += scaled;
+        pool.totalScaledDeposits += scaled;
+
+        emit BackstopCommitted(token, committed);
     }
 
     ////////////////////////

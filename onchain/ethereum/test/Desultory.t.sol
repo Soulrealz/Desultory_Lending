@@ -778,6 +778,162 @@ contract DesultoryTest is Test {
         desultory.borrowDUSD(2, amount);
     }
 
+    /// @dev leaves the USDC pool with zero available liquidity but non-zero cash, and
+    /// position 1 (alice, USDC collateral, WETH debt) deeply liquidatable.
+    ///
+    /// available = max(0, deposits - debt) and cash = deposits + reserves - debt, so
+    /// available = max(0, cash - reserves). Lending out all but 1k of the pool and then
+    /// letting a year of interest accrue puts reserves well above that 1k, which drives
+    /// available to zero while 1k of real USDC is still sitting in the contract. That 1k is
+    /// exactly what the backstop exists to unlock.
+    function _saturatedUsdcPool() internal {
+        MockERC20(usdc).mint(alice, 200_000e18);
+
+        vm.prank(alice);
+        desultory.deposit(0, usdc, 200_000e18); // position 1
+
+        vm.prank(bob);
+        desultory.deposit(0, weth, 1_000e18); // position 2
+
+        vm.prank(alice);
+        desultory.borrow(1, weth, 50e18); // alice owes WETH against USDC collateral
+
+        vm.prank(bob);
+        desultory.borrow(2, usdc, 199_000e18); // 1k of USDC cash left behind
+
+        vm.warp(block.timestamp + 365 days); // interest -> reserves on the next accrual
+
+        // refresh the USDC feed's timestamp so the health check below doesn't revert on
+        // staleness (OracleLib.TIMEOUT is 3 hours); the price itself is unchanged.
+        MockV3Aggregator(deploy.getFeedI(1)).updateAnswer(100_000_000);
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(30_000e18); // WETH up, alice underwater
+        assertLt(desultory.healthFactor(1), 1e18, "alice must be liquidatable");
+
+        // persist the year of accrual on both pools now, via trivial deposits. A test that
+        // only ever triggers accrual through a call expected to revert would read pre-warp
+        // figures afterward — a revert unwinds every storage write made during that call,
+        // including its own accrual. Likewise a "before" snapshot taken here (e.g. a
+        // position's WETH debt) must reflect the post-warp state, or a later comparison
+        // against an "after" figure read past a real accrual is comparing apples to
+        // oranges. These deposits are economically negligible against the pools' balances
+        // (1 wei rounds to a zero scaled credit and reverts, so small whole-token amounts
+        // are used instead).
+        MockERC20(usdc).mint(alice, 1e18);
+        vm.prank(alice);
+        desultory.deposit(1, usdc, 1e18);
+
+        MockERC20(weth).mint(bob, 1e18);
+        vm.prank(bob);
+        desultory.deposit(2, weth, 1e18);
+    }
+
+    /// @dev a liquidator holding WETH, approved, ready to repay alice's WETH debt
+    function _wethLiquidator() internal returns (address who) {
+        who = makeAddr("backstopLiquidator");
+        MockERC20(weth).mint(who, 1_000e18);
+        vm.prank(who);
+        MockERC20(weth).approve(address(desultory), type(uint256).max);
+    }
+
+    function testOrdinaryLiquidationCannotFillAgainstASaturatedPool() public {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        vm.prank(who);
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.liquidate(1, weth, usdc, 10e18);
+
+        assertEq(desultory.getAvailableLiquidity(usdc), 0, "pool must be saturated for this to mean anything");
+        assertGt(desultory.getPoolInfo(usdc).reserves, 0, "and must hold reserves the backstop can draw on");
+    }
+
+    function testBackstopFillsAgainstASaturatedPool() public {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        uint256 usdcBefore = MockERC20(usdc).balanceOf(who);
+        uint256 debtBefore = desultory.getPositionBorrowForToken(1, weth);
+
+        vm.prank(who);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        assertGt(MockERC20(usdc).balanceOf(who) - usdcBefore, 0, "liquidator was actually paid");
+        assertLt(desultory.getPositionBorrowForToken(1, weth), debtBefore, "debt was actually retired");
+        assertGt(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "reserves were committed");
+    }
+
+    function testBackstopNeverLeavesDepositsBelowDebt() public {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        vm.prank(who);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        uint256 deposits = pool.totalScaledDeposits * pool.liquidityIndex / 1e18;
+        uint256 debt = (pool.totalScaledBorrows * pool.borrowIndex + 1e18 - 1) / 1e18;
+        assertGe(deposits, debt, "USDC pool debt must not exceed deposits");
+        assertLe(uint256(desultory.getUtilization(usdc)), 10_000, "utilization must not exceed 100%");
+    }
+
+    function testBackstopPreservesCustody() public {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        vm.prank(who);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        uint256 deposits = pool.totalScaledDeposits * pool.liquidityIndex / 1e18;
+        uint256 debt = (pool.totalScaledBorrows * pool.borrowIndex + 1e18 - 1) / 1e18;
+        uint256 balance = MockERC20(usdc).balanceOf(address(desultory));
+
+        // the same identity property_custodyReconciles asserts
+        assertGe(balance + debt, deposits + pool.reserves, "custody must still cover obligations");
+    }
+
+    function testBackstopWithNoReservesBehavesLikeOrdinaryLiquidation() public {
+        // no warp, so no interest and no reserves; the whole pool is lent out, so there is
+        // no cash either and the backstop has nothing to unlock
+        MockERC20(usdc).mint(alice, 200_000e18);
+
+        vm.prank(alice);
+        desultory.deposit(0, usdc, 200_000e18);
+        vm.prank(bob);
+        desultory.deposit(0, weth, 1_000e18);
+        vm.prank(alice);
+        desultory.borrow(1, weth, 50e18);
+        vm.prank(bob);
+        desultory.borrow(2, usdc, 200_000e18);
+
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(30_000e18);
+        assertLt(desultory.healthFactor(1), 1e18, "alice must be liquidatable");
+        assertEq(desultory.getPoolInfo(usdc).reserves, 0, "fixture must have no reserves");
+
+        address who = _wethLiquidator();
+
+        vm.prank(who);
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        assertEq(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "nothing to commit, nothing committed");
+    }
+
+    function testBackstopDoesNotFireWhenCollateralIsTheBindingConstraint() public {
+        _makeLiquidatable(); // 1 WETH collateral in a pool with plenty of spare liquidity
+        _fundBobWithDusd(2_000e18);
+
+        uint256 reservesBefore = desultory.getPoolInfo(weth).reserves;
+
+        vm.prank(bob);
+        desultory.liquidateWithBackstop(1, address(dusd), weth, 500e18);
+
+        // the seizure was limited by what alice holds, not by pool liquidity, so committing
+        // reserves would have unlocked nothing and must not have happened
+        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "no commit when collateral binds");
+        assertGe(desultory.getPoolInfo(weth).reserves, reservesBefore, "reserves must not have been spent");
+    }
+
     function testHealthyPositionCannotBeLiquidated() public {
         vm.prank(alice);
         desultory.deposit(0, weth, 10e18);
