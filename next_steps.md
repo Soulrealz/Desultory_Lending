@@ -119,13 +119,21 @@ Brainstorm before coding — this is architectural, not bounded.
 
 ## Parked from D1 — small, none urgent
 
-All three are recorded in `docs/Protocol/Liquidations.md` and ADR 0004:
+All three are recorded in `docs/Protocol/Liquidations.md` and ADR 0004; item 1 is also
+recorded in ADR 0006, which corrects its scope:
 
-1. **Wei-scale rounding seam.** `getAvailableLiquidity` is computed in token units while
-   `_seizeCollateral` converts with `__toScaledUp` (rounds up), so a seizure that exactly
-   saturates the availability cap can leave a pool's deposits 1–2 wei below its debt.
-   Cannot trigger `property_borrowIndexOutpacesLiquidityIndex` (that needs a ~10% deficit).
-   The obvious patch is an unexplained `-1`, which is why it was left.
+1. **Wei-scale rounding seam — now routine on the backstop path.** `getAvailableLiquidity`
+   is computed in token units while `_seizeCollateral` converts with `__toScaledUp`
+   (rounds up), so a seizure that exactly saturates the availability cap can leave a
+   pool's deposits 1–2 wei below its debt. D1 met that precondition only occasionally.
+   `liquidateWithBackstop` sets the seizure cap to exactly the availability it just
+   unlocked, so it meets it on **every** call, and the commit's own down-rounding adds a
+   second floor in the same direction. Observed: a deterministic 2-wei shortfall against
+   a ~449,740-token pool. Still harmless — `property_borrowIndexOutpacesLiquidityIndex`
+   needs a ~10% deficit, `getUtilization` clamps at `MAX_BPS`, and
+   `property_custodyReconciles` is a `gte` the shortfall moves in the safe direction —
+   and still not worth the unexplained `-1` that would fix it. See ADR 0006's
+   Consequences and `testBackstopLeavesDepositsCoveringDebtWithinRoundingDust`.
 2. **`totalBadDebtUSD` double-count.** `deposit()` is permissionless, so a stranded
    position can be re-collateralized and re-strand, crediting the same debt twice.
    Documented only; a recognition-flag mapping was deliberately not added because it
