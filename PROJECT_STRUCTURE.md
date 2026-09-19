@@ -12,6 +12,7 @@ Desultory_Lending/
 ├── PROJECT_CONTEXT.md          # High-level map of core logic per module
 ├── PROJECT_STRUCTURE.md        # This file
 ├── README.md                   # Protocol specification: rates model, liquidation engine, governance
+├── next_steps.md               # Cold-start handoff: project state, what to build next and why
 ├── docs/                       # Obsidian vault (open this folder as the vault root)
 │   ├── README.md               # Vault orientation: the four zones and their accuracy contracts
 │   ├── .obsidian/              # Vault config (app/core-plugins/graph); workspace state gitignored
