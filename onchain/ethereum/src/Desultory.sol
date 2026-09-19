@@ -62,6 +62,8 @@ contract Desultory is Ownable, ReentrancyGuard {
     event DestinationSet(uint32 indexed eid, bool allowed);
     event DusdStabilityFeeSet(uint16 bps);
     event ReservesWithdrawn(address indexed token, address indexed to, uint256 amount);
+    event BackstopCommitted(address indexed token, uint256 amount);
+    event BackstopReleased(address indexed token, uint256 amount);
     event DusdBorrow(uint256 indexed position, address indexed recipient, uint256 amount, uint32 dstEid);
     event DusdRepay(uint256 indexed position, address indexed payer, uint256 amount);
     event DusdIndexUpdate(uint256 timestamp, uint256 dusdBorrowIndex, uint256 dusdReserves);
@@ -130,6 +132,12 @@ contract Desultory is Ownable, ReentrancyGuard {
         uint256 liquidityIndex; // starts at WAD, grows with lender yield
         uint256 borrowIndex; // starts at WAD, grows with the borrow rate
         uint256 totalScaledDeposits;
+        // the protocol's own share of totalScaledDeposits, funded out of reserves by the
+        // liquidation backstop. A SUBSET of the line above, never a parallel figure: it is
+        // included in every deposits total, utilization read and index distribution. It is
+        // deliberately not a position, so withdraw() — which keys off
+        // __scaledDeposits[positionId][token] and onlyPositionOwner — cannot reach it.
+        uint256 backstopScaledDeposits;
         uint256 totalScaledBorrows;
         uint256 reserves; // protocol cut, token units
         uint40 lastUpdate;
@@ -181,6 +189,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     uint16 private constant MAX_BPS = 10_000; // 100%
     uint16 private constant MAX_BONUS_BPS = 2_000; // 20% — constructor cap
     uint16 private constant LIQ_PROTOCOL_SHARE = 3_000; // 30% of the bonus
+    uint16 private constant LIQ_BACKSTOP_SHARE = 7_000; // 70% when the protocol funds the seizure
     uint16 private constant RESERVE_FACTOR = 1_000; // 10% of borrow interest to the protocol
     uint256 private constant WAD = 1e18;
     uint256 private constant SECONDS_PER_YEAR = 365 days;
@@ -246,6 +255,7 @@ contract Desultory is Ownable, ReentrancyGuard {
                 liquidityIndex: WAD,
                 borrowIndex: WAD,
                 totalScaledDeposits: 0,
+                backstopScaledDeposits: 0,
                 totalScaledBorrows: 0,
                 reserves: 0,
                 lastUpdate: uint40(block.timestamp)

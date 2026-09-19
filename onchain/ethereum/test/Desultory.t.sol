@@ -1121,4 +1121,13 @@ contract DesultoryTest is Test {
 
         assertGe(balance + borrows, deposits + pool.reserves, "custody must still cover obligations");
     }
+
+    ///////////////////////
+    // Backstop Tests
+    ///////////////////////
+
+    function testBackstopStartsEmptyOnEveryPool() public view {
+        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "WETH backstop starts empty");
+        assertEq(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "USDC backstop starts empty");
+    }
 }
