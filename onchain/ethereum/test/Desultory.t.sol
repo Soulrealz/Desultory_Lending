@@ -1525,4 +1525,111 @@ contract DesultoryTest is Test {
         uint256 gained = MockERC20(weth).balanceOf(bob) - bobWethBefore;
         assertGt(gained * 2500e18 / 1e18, repay, "liquidator must still clear a profit at 7000 bps");
     }
+
+    ///////////////////////
+    // Redemption Tests
+    ///////////////////////
+
+    /// @dev alice holds 10 WETH and owes 5000 DUSD — comfortably healthy, so redeemable.
+    /// bob holds DUSD to redeem with.
+    function _redeemableAlice() internal {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18); // position 1, $20k at 2000/WETH
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 5_000e18);
+
+        assertGe(desultory.healthFactor(1), 1e18, "alice must be healthy to be redeemable");
+
+        _fundBobWithDusd(3_000e18); // position 2
+    }
+
+    function testRedeemBurnsDusdAndReturnsCollateral() public {
+        _redeemableAlice();
+
+        uint256 bobWethBefore = MockERC20(weth).balanceOf(bob);
+        uint256 supplyBefore = dusd.totalSupply();
+
+        vm.prank(bob);
+        desultory.redeem(1, weth, 1_000e18);
+
+        // the position's DUSD debt fell by the full amount burned
+        assertApproxEqAbs(desultory.getPositionDusdDebt(1), 4_000e18, 1e12, "debt cancelled at par");
+        assertEq(supplyBefore - dusd.totalSupply(), 1_000e18, "supply fell by exactly what was burned");
+
+        // bob received 995 USD of WETH at 2000/WETH = 0.4975 WETH
+        uint256 expected = (995e18 * 1e18) / 2000e18;
+        assertApproxEqAbs(MockERC20(weth).balanceOf(bob) - bobWethBefore, expected, 1e12, "collateral net of fee");
+    }
+
+    /// @dev the fee stays with the position: it gives up 995 USD of collateral while
+    /// 1000 USD of debt is cancelled, so it is strictly better off by the 5 USD fee
+    function testRedeemLeavesTheFeeWithThePosition() public {
+        _redeemableAlice();
+
+        uint256 collatBefore = desultory.getPositionCollateralForToken(1, weth);
+        uint256 reservesBefore = desultory.getPoolInfo(weth).reserves;
+
+        vm.prank(bob);
+        desultory.redeem(1, weth, 1_000e18);
+
+        uint256 removed = collatBefore - desultory.getPositionCollateralForToken(1, weth);
+        uint256 removedUSD = (removed * 2000e18) / 1e18;
+
+        assertApproxEqAbs(removedUSD, 995e18, 1e12, "position gives up only the net amount");
+        assertEq(desultory.getPoolInfo(weth).reserves, reservesBefore, "no protocol cut on the ordinary path");
+    }
+
+    /// @dev the property the healthy-only gate rests on
+    function testRedeemImprovesTheTargetHealthFactor() public {
+        _redeemableAlice();
+
+        uint256 hfBefore = desultory.healthFactor(1);
+
+        vm.prank(bob);
+        desultory.redeem(1, weth, 1_000e18);
+
+        assertGt(desultory.healthFactor(1), hfBefore, "redemption must leave the target safer");
+    }
+
+    function testRedeemRejectsAnUnhealthyPosition() public {
+        _makeLiquidatable(); // alice: 1 WETH, 2100 DUSD debt, WETH crashed to 2500 seize line
+        _fundBobWithDusd(2_000e18);
+
+        assertLt(desultory.healthFactor(1), 1e18, "fixture must be unhealthy");
+
+        vm.prank(bob);
+        vm.expectRevert(); // Desultory__NotRedeemable; the HF it carries is read inside the call
+        desultory.redeem(1, weth, 500e18);
+    }
+
+    /// @dev redemption and liquidation partition the book: the position the previous test
+    /// refused is exactly the one liquidate() accepts
+    function testUnhealthyPositionIsLiquidatableInsteadOfRedeemable() public {
+        _makeLiquidatable();
+        _fundBobWithDusd(2_000e18);
+
+        vm.prank(bob);
+        desultory.liquidate(1, address(dusd), weth, 500e18);
+
+        assertLt(desultory.getPositionDusdDebt(1), 2_100e18, "liquidation is the right tool here");
+    }
+
+    function testRedeemRevertsAgainstAPositionWithNoDusdDebt() public {
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18); // position 1, no DUSD debt
+        _fundBobWithDusd(1_000e18);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Desultory.Desultory__NoDusdDebt.selector, 1));
+        desultory.redeem(1, weth, 100e18);
+    }
+
+    function testRedeemClampsToThePositionsDusdDebt() public {
+        _redeemableAlice();
+
+        vm.prank(bob);
+        desultory.redeem(1, weth, 3_000e18); // bob has exactly 3000; alice owes 5000
+
+        assertApproxEqAbs(desultory.getPositionDusdDebt(1), 2_000e18, 1e12, "clamped, not reverted");
+    }
 }
