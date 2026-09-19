@@ -1533,6 +1533,11 @@ contract DesultoryTest is Test {
     /// @dev alice holds 10 WETH and owes 5000 DUSD — comfortably healthy, so redeemable.
     /// bob holds DUSD to redeem with.
     function _redeemableAlice() internal {
+        // anchor the price rather than inherit the deploy default of 3000 — the expected
+        // values below are computed at 2000, and a fixture that states its own assumption
+        // is what the rest of this file does (see _makeLiquidatable)
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2_000e18);
+
         vm.prank(alice);
         desultory.deposit(0, weth, 10e18); // position 1, $20k at 2000/WETH
         vm.prank(alice);
