@@ -27,10 +27,24 @@ one that catches a botched storage migration, which is the most likely way the
 cross-chain work breaks accounting silently.
 
 The backstop term arrived with [[0006-internal-liquidation-backstop]], which gave the
-protocol its own deposit line funded out of reserves. It is a *strengthening*, not a
-loosened bound: the equality is still exact, with one more known term on the left rather
-than a tolerance on the right. A backstop commit that credited `totalScaledDeposits`
-without crediting `backstopScaledDeposits`, or vice versa, breaks this immediately.
+protocol its own deposit line funded out of reserves. Adding it **weakens** invariant 1
+as a constraint, and it is worth being precise about that: a free variable on the left of
+an equality lets the remaining variables move and still balance, so the equality alone no
+longer pins the per-position sums the way it did. It stays exact — there is no tolerance
+on the right — but exactness is not the same as strength.
+
+What keeps it honest is that the new term is separately anchored, twice. Upward, by
+invariant 12: `backstopScaledDeposits <= totalScaledDeposits`. More importantly **in
+value**, by `property_custodyReconciles` (invariant 4): crediting both deposit lines
+without debiting `pool.reserves` by the matching amount breaks custody immediately, so
+the backstop term cannot be inflated to absorb a discrepancy elsewhere. Invariant 1 then
+catches the remaining shape of the slip — a commit or release that credits
+`totalScaledDeposits` without crediting `backstopScaledDeposits`, or vice versa.
+
+Note also that invariant 12 is strictly implied by invariant 1 (a sum of non-negative
+per-position terms plus the backstop term equals the total, so the backstop term cannot
+exceed it). It is cheap redundancy that survives when position enumeration does not, not
+independent coverage.
 
 **2. Indexes never decrease.**
 `liquidityIndex` and `borrowIndex` are monotonically non-decreasing across every call.
@@ -93,8 +107,16 @@ Checked directly against `LiquidationMath.seizeFromRepay` / `splitBonus` rather 
 through a full `liquidate()` call: for a fixed repay amount, the liquidator's share of
 the seized collateral (after the protocol's cut) must be worth at least what they paid.
 Asserted at **both** bonus shares — 3000 (`liquidate`) and 7000
-(`liquidateWithBackstop`) — since the backstop path pays the liquidator a thinner slice
-and it must still be a slice worth taking.
+(`liquidateWithBackstop`).
+
+Be clear about what that second share pins, because it is less than it looks. `splitBonus`
+caps `protocolCut` at `bonus`, so `toLiquidator >= baseAmount` holds **structurally for
+every share from 0 to 10000**; the assertion cannot fail unless that cap is removed or
+broken. So this property pins the cap — worth pinning, since removing it would make
+liquidations a guaranteed loss and the path would go unused — and it does **not**
+demonstrate that the 7000 share is economically viable. It asserts break-even at zero gas,
+not profit. Whether 30% of the bonus actually pays a liquidator is an economic argument
+made in [[0006-internal-liquidation-backstop]], not something this harness checks.
 
 This is deliberately *not* "liquidation improves the health factor" — that claim is
 false by design, since seizing collateral plus a bonus removes more value than the debt

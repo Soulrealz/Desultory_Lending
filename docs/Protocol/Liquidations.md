@@ -125,9 +125,11 @@ seizure of up to `want` can proceed:
    clamped to `pool.reserves` when reserves cannot cover the full shortfall.
 3. Convert `need` to a scaled credit rounding **down**, the direction `deposit()` uses, so
    the protocol never receives more deposit claim than it paid for. Decrement
-   `pool.reserves` by the exact round-trip of that scaled figure rather than by `need`, so
-   no dust drifts between the two lines, and credit both `pool.backstopScaledDeposits` and
-   `pool.totalScaledDeposits`. Emits `BackstopCommitted(token, committed)`.
+   `pool.reserves` by the exact round-trip of that scaled figure rather than by `need` —
+   the truncated remainder stays in reserves — and credit both
+   `pool.backstopScaledDeposits` and `pool.totalScaledDeposits`. Emits
+   `BackstopCommitted(token, committed)`. That round-trip is exact for the scaled figure
+   but not for the pool's *deposits* figure; see Known limitations below.
 
 **No token moves.** Reserves were already cash sitting in the contract; only the split
 between "protocol revenue" and "deposit base" changes, so both sides of
@@ -136,9 +138,13 @@ preserved by construction rather than by a check — the same argument
 [[0005-treasury-withdrawal]] makes for `withdrawReserves`.
 
 Ordering inside `_liquidate` matters twice. The commit runs **after** `seizeCap` is
-clamped to both the position's actual collateral and the requested seize amount, so
-nothing is committed when collateral rather than liquidity is what binds — reserves spent
-to unlock liquidity for collateral that is not there would be pure waste. It runs
+clamped to both the position's actual collateral and the requested seize amount, so the
+commit is sized to the seizure that can actually happen rather than to the one that was
+requested — reserves are never converted to unlock liquidity for collateral that is not
+there. Read this as a bound on *how much* is committed, not as a guard against committing
+at all: a position holding 5 WETH against a 50 WETH-equivalent seize in a short WETH pool
+still triggers a commit, sized to the 5 WETH that can actually be taken. Only the
+oversized figure is kept out. It runs
 **before** `getAvailableLiquidity` is read for the final clamp, and that availability is
 re-read fresh rather than incremented by an assumed amount, because the down-rounded
 credit can land a wei short of what was asked for. A pool with no reserves commits
@@ -267,6 +273,22 @@ etc.) is out of scope for this project.
   the shortfall is dust (≤ 10 wei) rather than zero, and says why. Invisible to every
   existing invariant; economically meaningless; real; and routine rather than rare on one
   of the two paths.
+- **A commit can move custody's right-hand side up by 1 wei.** `_commitBackstop`
+  decrements `pool.reserves` by the exact round-trip of the scaled credit, which is exact
+  for that scaled figure — but not for the pool's deposits figure. Deposits read as
+  `floor((T + scaled) * i / WAD)`, and `floor(x + y)` can exceed `floor(x) + floor(y)`, so
+  deposits can rise by `committed + 1` while `pool.reserves` falls by exactly `committed`.
+  `property_custodyReconciles` is `balance + borrows >= deposits + reserves`, so its
+  right-hand side can gain up to **1 wei per commit** with nothing on the left to match.
+  This is the one rounding direction on the whole backstop path that runs *against* the
+  pool rather than for it. It is acceptable because the bound is tight — at most 1 wei,
+  and every commit costs a real liquidation, so there is no way to grind it — and because
+  the pool's own cash is untouched either way.
+
+  `releaseBackstop` is safe under the same analysis, and the contrast is worth writing
+  down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while
+  `pool.reserves` rises by exactly `amount`. The property's right-hand side is
+  non-increasing across a release.
 
 ## History: the seven defects of the old engine
 

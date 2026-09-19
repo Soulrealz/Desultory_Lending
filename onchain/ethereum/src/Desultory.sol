@@ -666,10 +666,13 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
 
         // On the backstop path, give the pool the liquidity first. Sized against seizeCap
-        // rather than seizeAmount so nothing is committed when the position's collateral is
-        // what binds — reserves spent to unlock liquidity for collateral that is not there
-        // would be pure waste. Then read availability fresh: the commit raises deposits, so
-        // a figure taken beforehand is stale by construction.
+        // rather than seizeAmount so the commit is bounded by the seizure that can actually
+        // happen rather than the one that was asked for: reserves are never converted to
+        // unlock liquidity for collateral that is not there. It is a bound on the amount,
+        // not a guard against committing — a position short of collateral in a pool short
+        // of liquidity still commits, just sized to the smaller figure. Then read
+        // availability fresh: the commit raises deposits, so a figure taken beforehand is
+        // stale by construction.
         if (useBackstop) {
             _commitBackstop(collateralAsset, seizeCap);
         }
@@ -760,6 +763,8 @@ contract Desultory is Ownable, ReentrancyGuard {
     function _commitBackstop(address token, uint256 want) private {
         Pool storage pool = __pools[token];
 
+        // deposits round DOWN and debt rounds UP, each the direction that understates the
+        // pool's own position, so the deficit sized against below is never too small
         uint256 deposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
         uint256 debt = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex);
 
@@ -788,8 +793,22 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
 
         // decrement reserves by the exact round-trip of that scaled figure rather than by
-        // `need`, so no dust drifts between the two lines — the truncated remainder simply
-        // stays in reserves. committed <= need <= pool.reserves, so this cannot underflow.
+        // `need` — the truncated remainder simply stays in reserves. committed <= need <=
+        // pool.reserves, so this cannot underflow.
+        //
+        // That round-trip is exact for `scaled` itself but NOT for the pool's deposits
+        // figure. Deposits read as floor((T + scaled) * i / WAD), and floor(x + y) can
+        // exceed floor(x) + floor(y), so deposits may rise by `committed + 1` while
+        // pool.reserves falls by exactly `committed`. property_custodyReconciles is
+        // balance + borrows >= deposits + reserves, so its right-hand side can gain up to
+        // 1 wei per commit with nothing on the left to match. This is the one rounding
+        // direction on this path that runs against the pool; it is bounded at <= 1 wei per
+        // commit and every commit costs a real liquidation, so it is a documented seam
+        // rather than a solvency concern. See docs/Protocol/Liquidations.md.
+        //
+        // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so
+        // deposits fall by at least `amount` while reserves rise by exactly `amount`, and
+        // the property's right-hand side is non-increasing.
         uint256 committed = __fromScaledDown(scaled, pool.liquidityIndex);
 
         pool.reserves -= committed;

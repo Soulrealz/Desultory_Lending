@@ -92,11 +92,16 @@ Five decisions, each with its reasoning:
 
    Ordering inside `_liquidate` matters twice. The commit runs **after** `seizeCap` is
    clamped to both the position's actual collateral and the requested seize amount, so
-   nothing is committed when collateral rather than liquidity is what binds — reserves
-   spent to unlock liquidity for collateral that is not there would be pure waste. It
-   runs **before** `getAvailableLiquidity` is read for the final clamp, and that read is
-   taken fresh rather than incremented by an assumed amount, because the down-rounded
-   credit can land a wei short of what was asked for.
+   the commit is sized to the seizure that can actually happen rather than to the one
+   that was requested: reserves are never converted to unlock liquidity for collateral
+   that is not there. This is a **bound on the amount, not a guard against committing**.
+   A position holding 5 WETH against a 50 WETH-equivalent seize in a short WETH pool
+   still commits — `_commitBackstop(collateralAsset, 5e18)` fires and still converts
+   reserves, just sized to the smaller figure. What the ordering buys is that the
+   oversized 50 WETH figure never reaches it. It runs **before** `getAvailableLiquidity`
+   is read for the final clamp, and that read is taken fresh rather than incremented by
+   an assumed amount, because the down-rounded credit can land a wei short of what was
+   asked for.
 
 3. **`LIQ_BACKSTOP_SHARE = 7_000`, the mirror of the ordinary 3000 split, taken out of
    the liquidator's bonus.** On the backstop path the protocol is the one carrying the

@@ -933,19 +933,108 @@ contract DesultoryTest is Test {
         assertEq(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "nothing to commit, nothing committed");
     }
 
-    function testBackstopDoesNotFireWhenCollateralIsTheBindingConstraint() public {
-        _makeLiquidatable(); // 1 WETH collateral in a pool with plenty of spare liquidity
+    function testBackstopCommitsNothingOnALiquidPool() public {
+        _makeLiquidatable();
         _fundBobWithDusd(2_000e18);
 
-        uint256 reservesBefore = desultory.getPoolInfo(weth).reserves;
+        // 1 WETH of collateral against 101 WETH of deposits and zero WETH borrows: the pool
+        // is liquid with room to spare, so _commitBackstop returns at its FIRST branch
+        // (need = debt + want <= deposits) without looking at reserves at all. Nothing here
+        // exercises the sizing against seizeCap — for that see
+        // testBackstopCommitsSizedToCollateralWhenBothBind.
+        uint256 liquidityBefore = desultory.getAvailableLiquidity(weth);
 
         vm.prank(bob);
         desultory.liquidateWithBackstop(1, address(dusd), weth, 500e18);
 
-        // the seizure was limited by what alice holds, not by pool liquidity, so committing
-        // reserves would have unlocked nothing and must not have happened
-        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "no commit when collateral binds");
-        assertGe(desultory.getPoolInfo(weth).reserves, reservesBefore, "reserves must not have been spent");
+        // the pool must actually have been liquid relative to the seizure, or the assertion
+        // below proves nothing: 500 DUSD repaid at 2500/WETH with a 1000bps bonus seizes
+        // about 0.22 WETH, far inside available liquidity.
+        assertGt(liquidityBefore, 1e18, "fixture must leave the pool liquid past the seizure");
+        assertEq(desultory.getPoolInfo(weth).backstopScaledDeposits, 0, "a liquid pool commits nothing");
+    }
+
+    /// @dev the case the test above does NOT cover: collateral binds AND the pool is short.
+    /// alice keeps most of her collateral in WETH and only a sliver in USDC, so a USDC
+    /// seizure is capped far below what the repayment warrants, while the USDC pool itself
+    /// is saturated and holds reserves. A commit must still happen — sizing against
+    /// seizeCap bounds it, it does not suppress it — and must be sized to the reduced cap.
+    function testBackstopCommitsSizedToCollateralWhenBothBind() public {
+        // alice: 5 WETH of real collateral plus a 100 USDC sliver (position 1)
+        vm.prank(alice);
+        desultory.deposit(0, weth, 5e18);
+        vm.prank(alice);
+        desultory.deposit(1, usdc, 100e18);
+
+        // carol supplies the USDC pool (position 2)
+        address carol = makeAddr("carol");
+        MockERC20(usdc).mint(carol, 200_000e18);
+        vm.startPrank(carol);
+        MockERC20(usdc).approve(address(desultory), type(uint256).max);
+        desultory.deposit(0, usdc, 200_000e18);
+        vm.stopPrank();
+
+        // dave drains it to ~99.5% utilization, leaving 1k of USDC cash behind (position 3)
+        address dave = makeAddr("dave");
+        MockERC20(weth).mint(dave, 1_000e18);
+        vm.startPrank(dave);
+        MockERC20(weth).approve(address(desultory), type(uint256).max);
+        desultory.deposit(0, weth, 1_000e18);
+        desultory.borrow(3, usdc, 199_000e18);
+        vm.stopPrank();
+
+        // alice borrows DUSD against the pair, inside her LTV cap (5 * 3000 * 0.7 + 100 *
+        // 0.85 = 10_585)
+        vm.prank(alice);
+        desultory.borrowDUSD(1, 10_000e18);
+
+        vm.warp(block.timestamp + 365 days); // interest -> reserves on the next accrual
+
+        MockV3Aggregator(deploy.getFeedI(1)).updateAnswer(100_000_000); // refresh, same price
+        MockV3Aggregator(deploy.getFeedI(0)).updateAnswer(2500e18); // WETH down, alice under
+        assertLt(desultory.healthFactor(1), 1e18, "alice must be liquidatable");
+
+        vm.prank(dave);
+        desultory.borrowDUSD(3, 1_000e18); // dave is the liquidator and needs DUSD to repay
+
+        // persist the year of accrual on the USDC pool before snapshotting it: a figure read
+        // pre-accrual is not comparable with one read after the liquidation's own accrue()
+        MockERC20(usdc).mint(carol, 1e18);
+        vm.prank(carol);
+        desultory.deposit(2, usdc, 1e18);
+
+        Desultory.Pool memory before = desultory.getPoolInfo(usdc);
+        uint256 depositsBefore = before.totalScaledDeposits * before.liquidityIndex / 1e18;
+        uint256 debtBefore = (before.totalScaledBorrows * before.borrowIndex + 1e18 - 1) / 1e18;
+        uint256 deficit = debtBefore > depositsBefore ? debtBefore - depositsBefore : 0;
+
+        uint256 capBefore = desultory.getPositionCollateralForToken(1, usdc);
+        // 500 DUSD repaid at $1 against USDC's 500bps bonus, USDC at $1. Kept under the
+        // ~1.1k of USDC cash the fixture leaves in the pool, since reserves exceed the
+        // deposit deficit by exactly that cash — a larger figure would make reserves the
+        // binding constraint and the final bound would stop discriminating.
+        uint256 seizeRequested = 525e18;
+
+        // the two preconditions this test is named for. Without the first, collateral does
+        // not bind; without the second, reserves are what limits the commit and the bound
+        // asserted at the end would hold for any sizing at all.
+        assertLt(capBefore, seizeRequested, "collateral must be what binds the seizure");
+        assertGt(before.reserves, deficit + seizeRequested, "reserves must not be the binding constraint");
+        assertEq(desultory.getAvailableLiquidity(usdc), 0, "the pool must be short of liquidity");
+
+        vm.prank(dave);
+        desultory.liquidateWithBackstop(1, address(dusd), usdc, 500e18);
+
+        Desultory.Pool memory afterPool = desultory.getPoolInfo(usdc);
+        uint256 committed = afterPool.backstopScaledDeposits * afterPool.liquidityIndex / 1e18;
+
+        // it fired: a short pool commits even though collateral is what binds
+        assertGt(committed, 0, "the backstop must commit when the pool is short");
+        // and it was sized to the reduced cap: need = (debt - deposits) + seizeCap
+        assertLe(committed, deficit + capBefore, "commit must be bounded by the reduced cap");
+        // which is strictly less than what sizing against the requested seize would have
+        // committed, and reserves would have covered that larger figure
+        assertLt(committed, deficit + seizeRequested, "commit must not be sized to the requested seize");
     }
 
     /// @dev drive a backstop commit, then hand back how much is committed in token units
@@ -970,7 +1059,9 @@ contract DesultoryTest is Test {
     }
 
     function testReleaseBackstopSucceedsOnceLiquidityReturns() public {
-        uint256 committed = _commitViaLiquidation();
+        // the fixture's return is deliberately dropped here: this test releases
+        // type(uint256).max rather than the snapshotted figure (see below)
+        _commitViaLiquidation();
 
         // bob repays his USDC debt, freeing the pool
         vm.prank(bob);
