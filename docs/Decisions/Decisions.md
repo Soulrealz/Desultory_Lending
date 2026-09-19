@@ -20,3 +20,5 @@ which is what [[Protocol]] is for.
 - [[0002-internal-consistency-invariants]] — fuzz for internal consistency, not economic solvency (**superseded** on the solvency point by 0004)
 - [[0003-dusd-only-cross-chain-borrowing]] — only DUSD crosses chains; every position has one home chain
 - [[0004-liquidation-engine]] — single-entry-point liquidation, clamp-and-count bad debt
+- [[0005-treasury-withdrawal]] — token reserves are withdrawable; DUSD reserves are not
+- [[0006-internal-liquidation-backstop]] — reserves are committed as a protocol-owned deposit to fund a seizure

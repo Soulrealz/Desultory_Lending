@@ -41,6 +41,8 @@ contract Desultory is Ownable, ReentrancyGuard {
     error Desultory__PositionDoesNotExist(uint256 positionId);
     error Desultory__InsufficientLiquidity(address token);
     error Desultory__FeeTooHigh();
+    error Desultory__ZeroAddress();
+    error Desultory__InsufficientReserves(address token);
     error Desultory__NoDusdDebt(uint256 positionId);
     error Desultory__AdapterNotSet();
     error Desultory__DestinationNotAllowed(uint32 eid);
@@ -59,6 +61,9 @@ contract Desultory is Ownable, ReentrancyGuard {
     event AdapterSet(address indexed adapter);
     event DestinationSet(uint32 indexed eid, bool allowed);
     event DusdStabilityFeeSet(uint16 bps);
+    event ReservesWithdrawn(address indexed token, address indexed to, uint256 amount);
+    event BackstopCommitted(address indexed token, uint256 amount);
+    event BackstopReleased(address indexed token, uint256 amount);
     event DusdBorrow(uint256 indexed position, address indexed recipient, uint256 amount, uint32 dstEid);
     event DusdRepay(uint256 indexed position, address indexed payer, uint256 amount);
     event DusdIndexUpdate(uint256 timestamp, uint256 dusdBorrowIndex, uint256 dusdReserves);
@@ -127,6 +132,12 @@ contract Desultory is Ownable, ReentrancyGuard {
         uint256 liquidityIndex; // starts at WAD, grows with lender yield
         uint256 borrowIndex; // starts at WAD, grows with the borrow rate
         uint256 totalScaledDeposits;
+        // the protocol's own share of totalScaledDeposits, funded out of reserves by the
+        // liquidation backstop. A SUBSET of the line above, never a parallel figure: it is
+        // included in every deposits total, utilization read and index distribution. It is
+        // deliberately not a position, so withdraw() — which keys off
+        // __scaledDeposits[positionId][token] and onlyPositionOwner — cannot reach it.
+        uint256 backstopScaledDeposits;
         uint256 totalScaledBorrows;
         uint256 reserves; // protocol cut, token units
         uint40 lastUpdate;
@@ -178,6 +189,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     uint16 private constant MAX_BPS = 10_000; // 100%
     uint16 private constant MAX_BONUS_BPS = 2_000; // 20% — constructor cap
     uint16 private constant LIQ_PROTOCOL_SHARE = 3_000; // 30% of the bonus
+    uint16 private constant LIQ_BACKSTOP_SHARE = 7_000; // 70% when the protocol funds the seizure
     uint16 private constant RESERVE_FACTOR = 1_000; // 10% of borrow interest to the protocol
     uint256 private constant WAD = 1e18;
     uint256 private constant SECONDS_PER_YEAR = 365 days;
@@ -243,6 +255,7 @@ contract Desultory is Ownable, ReentrancyGuard {
                 liquidityIndex: WAD,
                 borrowIndex: WAD,
                 totalScaledDeposits: 0,
+                backstopScaledDeposits: 0,
                 totalScaledBorrows: 0,
                 reserves: 0,
                 lastUpdate: uint40(block.timestamp)
@@ -282,6 +295,105 @@ contract Desultory is Ownable, ReentrancyGuard {
     function setAllowedDestination(uint32 eid, bool allowed) external onlyOwner {
         allowedDestination[eid] = allowed;
         emit DestinationSet(eid, allowed);
+    }
+
+    /**
+     * @dev withdraw a token pool's accumulated protocol revenue.
+     *
+     * Reserves fill from three places: the RESERVE_FACTOR cut of borrow interest, and
+     * LIQ_PROTOCOL_SHARE of every liquidation bonus, both in this token. Until now there
+     * was no way out of the contract for either.
+     *
+     * This cannot strand depositors. The identity getAvailableLiquidity documents is
+     * cash = deposits + reserves - debt; withdrawing X drops the balance by X and
+     * reserves by X, so both sides of it fall together. That is why no liquidity gate is
+     * needed here, unlike withdraw() and borrow(), which move deposits against a fixed
+     * reserve backing.
+     *
+     * DUSD reserves are deliberately NOT withdrawable here. dusdReserves is a claim, not
+     * a balance: borrowDUSD mints to the borrower and repayDUSD burns from the payer, so
+     * the protocol never holds DUSD. Paying it out would mean minting unbacked supply,
+     * which is a monetary decision belonging with the peg design, not with treasury
+     * plumbing.
+     */
+    function withdrawReserves(address token, address to, uint256 amount)
+        external
+        onlyOwner
+        moreThanZero(amount)
+        isAllowedToken(token)
+    {
+        if (to == address(0)) {
+            revert Desultory__ZeroAddress();
+        }
+
+        // reserves grow during accrual; reading them first would pay out a stale figure
+        accrue(token);
+
+        Pool storage pool = __pools[token];
+        if (amount > pool.reserves) {
+            revert Desultory__InsufficientReserves(token);
+        }
+
+        pool.reserves -= amount;
+
+        IERC20(token).safeTransfer(to, amount);
+        emit ReservesWithdrawn(token, to, amount);
+    }
+
+    /**
+     * @dev return committed backstop capital to the pool's reserves.
+     *
+     * The reverse of _commitBackstop, and it moves no tokens either. Cash leaves the
+     * contract only through withdrawReserves, so there stays exactly one door out and its
+     * custody argument is unchanged. Interest the backstop deposit earned through
+     * liquidityIndex is realized into reserves on the way through.
+     *
+     * Unlike withdrawReserves this DOES need a liquidity gate: it lowers deposits against a
+     * fixed reserve backing, exactly as withdraw() does, rather than moving both lines
+     * together. Same gate, same reason.
+     *
+     * The shape deliberately mirrors withdraw() — full-balance shortcut, __toScaledUp for
+     * the partial case so the protocol gives up at least the scaled amount it redeems,
+     * clamp, then the gate — so the two read as the same operation.
+     */
+    function releaseBackstop(address token, uint256 amount)
+        external
+        onlyOwner
+        moreThanZero(amount)
+        isAllowedToken(token)
+    {
+        // the backstop deposit grows with the index; reading it first would release a
+        // stale figure and strand the interest it earned
+        accrue(token);
+
+        Pool storage pool = __pools[token];
+
+        uint256 scaledBalance = pool.backstopScaledDeposits;
+        uint256 balance = __fromScaledDown(scaledBalance, pool.liquidityIndex);
+        if (balance == 0) {
+            revert Desultory__ZeroAmount();
+        }
+
+        uint256 scaledAmount;
+        if (amount >= balance) {
+            amount = balance;
+            scaledAmount = scaledBalance;
+        } else {
+            scaledAmount = __toScaledUp(amount, pool.liquidityIndex);
+            if (scaledAmount > scaledBalance) {
+                scaledAmount = scaledBalance;
+            }
+        }
+
+        if (amount > getAvailableLiquidity(token)) {
+            revert Desultory__InsufficientLiquidity(token);
+        }
+
+        pool.backstopScaledDeposits = scaledBalance - scaledAmount;
+        pool.totalScaledDeposits -= scaledAmount;
+        pool.reserves += amount;
+
+        emit BackstopReleased(token, amount);
     }
 
     /**
@@ -472,6 +584,37 @@ contract Desultory is Ownable, ReentrancyGuard {
         moreThanZero(repayAmount)
         isAllowedToken(collateralAsset)
     {
+        _liquidate(positionId, debtAsset, collateralAsset, repayAmount, false);
+    }
+
+    /**
+     * @dev liquidate against a pool that cannot spare the liquidity, funding the seizure
+     * from the protocol's own reserves.
+     *
+     * Identical to liquidate() in every respect but two: the seizure cap may draw on
+     * reserves converted to a protocol-owned deposit (see _commitBackstop), and the
+     * protocol keeps LIQ_BACKSTOP_SHARE of the bonus rather than LIQ_PROTOCOL_SHARE.
+     *
+     * A separate entry point rather than an automatic fallback inside liquidate(), so a
+     * liquidator that quoted its profit off the ordinary split is never silently paid less.
+     * Choosing this function is the consent.
+     */
+    function liquidateWithBackstop(uint256 positionId, address debtAsset, address collateralAsset, uint256 repayAmount)
+        external
+        nonReentrant
+        moreThanZero(repayAmount)
+        isAllowedToken(collateralAsset)
+    {
+        _liquidate(positionId, debtAsset, collateralAsset, repayAmount, true);
+    }
+
+    function _liquidate(
+        uint256 positionId,
+        address debtAsset,
+        address collateralAsset,
+        uint256 repayAmount,
+        bool useBackstop
+    ) private {
         if (debtAsset != address(__DUSD) && __tokenInfos[debtAsset].priceFeed == address(0)) {
             revert Desultory__TokenNotWhitelisted(debtAsset);
         }
@@ -518,6 +661,21 @@ contract Desultory is Ownable, ReentrancyGuard {
         // capped figure — charging the original amount for a short delivery is the same
         // class of bug as paying out in the wrong token.
         uint256 seizeCap = getPositionCollateralForToken(positionId, collateralAsset);
+        if (seizeAmount < seizeCap) {
+            seizeCap = seizeAmount;
+        }
+
+        // On the backstop path, give the pool the liquidity first. Sized against seizeCap
+        // rather than seizeAmount so the commit is bounded by the seizure that can actually
+        // happen rather than the one that was asked for: reserves are never converted to
+        // unlock liquidity for collateral that is not there. It is a bound on the amount,
+        // not a guard against committing — a position short of collateral in a pool short
+        // of liquidity still commits, just sized to the smaller figure. Then read
+        // availability fresh: the commit raises deposits, so a figure taken beforehand is
+        // stale by construction.
+        if (useBackstop) {
+            _commitBackstop(collateralAsset, seizeCap);
+        }
         {
             uint256 availableLiquidity = getAvailableLiquidity(collateralAsset);
             if (availableLiquidity < seizeCap) {
@@ -542,8 +700,9 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
 
         uint256 baseAmount = LiquidationMath.repayFromSeize(seizeAmount, bonusBps);
-        (uint256 protocolCut, uint256 toLiquidator) =
-            LiquidationMath.splitBonus(baseAmount, seizeAmount, LIQ_PROTOCOL_SHARE);
+        (uint256 protocolCut, uint256 toLiquidator) = LiquidationMath.splitBonus(
+            baseAmount, seizeAmount, useBackstop ? LIQ_BACKSTOP_SHARE : LIQ_PROTOCOL_SHARE
+        );
 
         // --- effects, then an external call ---
         // _retireDebt itself performs an external call (DUSD burn, or safeTransferFrom for a
@@ -585,6 +744,78 @@ contract Desultory is Ownable, ReentrancyGuard {
         __scaledDeposits[positionId][collateralAsset] -= scaled;
         pool.totalScaledDeposits -= scaled;
         pool.reserves += protocolCut;
+    }
+
+    /**
+     * @dev convert protocol reserves into a protocol-owned deposit so a seizure of up to
+     * `want` can proceed without leaving the pool's deposits below its debt.
+     *
+     * No token moves: reserves are already cash sitting in this contract. Only the split
+     * between "protocol revenue" and "deposit base" changes, so the balance is untouched
+     * and both sides of cash = deposits + reserves - debt fall together —
+     * property_custodyReconciles is preserved by construction, not by a check, the same
+     * argument withdrawReserves makes.
+     *
+     * The protocol becomes a lender in a pool it cannot withdraw from until utilization
+     * falls. That liquidity risk is the real cost of the backstop, and it is what
+     * LIQ_BACKSTOP_SHARE pays for.
+     */
+    function _commitBackstop(address token, uint256 want) private {
+        Pool storage pool = __pools[token];
+
+        // deposits round DOWN and debt rounds UP, each the direction that understates the
+        // pool's own position, so the deficit sized against below is never too small
+        uint256 deposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
+        uint256 debt = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex);
+
+        // deposits + X must cover debt + want, so the seizure leaves deposits >= debt.
+        //
+        // Sized against the raw figures rather than getAvailableLiquidity, deliberately.
+        // That view clamps a deposits-below-debt pool to zero, and a pool sits in exactly
+        // that state after any accrual — borrowIndex grows faster than liquidityIndex by
+        // the reserve cut, every time. Sizing from the clamped view would under-commit by
+        // that whole deficit and the backstop would silently do nothing.
+        uint256 need = debt + want;
+        if (need <= deposits) {
+            return;
+        }
+        need -= deposits;
+
+        if (need > pool.reserves) {
+            need = pool.reserves;
+        }
+
+        // the scaled credit rounds DOWN, the same direction deposit() uses: the protocol
+        // never receives more deposit claim than it paid for
+        uint256 scaled = __toScaledDown(need, pool.liquidityIndex);
+        if (scaled == 0) {
+            return;
+        }
+
+        // decrement reserves by the exact round-trip of that scaled figure rather than by
+        // `need` — the truncated remainder simply stays in reserves. committed <= need <=
+        // pool.reserves, so this cannot underflow.
+        //
+        // That round-trip is exact for `scaled` itself but NOT for the pool's deposits
+        // figure. Deposits read as floor((T + scaled) * i / WAD), and floor(x + y) can
+        // exceed floor(x) + floor(y), so deposits may rise by `committed + 1` while
+        // pool.reserves falls by exactly `committed`. property_custodyReconciles is
+        // balance + borrows >= deposits + reserves, so its right-hand side can gain up to
+        // 1 wei per commit with nothing on the left to match. This is the one rounding
+        // direction on this path that runs against the pool; it is bounded at <= 1 wei per
+        // commit and every commit costs a real liquidation, so it is a documented seam
+        // rather than a solvency concern. See docs/Protocol/Liquidations.md.
+        //
+        // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so
+        // deposits fall by at least `amount` while reserves rise by exactly `amount`, and
+        // the property's right-hand side is non-increasing.
+        uint256 committed = __fromScaledDown(scaled, pool.liquidityIndex);
+
+        pool.reserves -= committed;
+        pool.backstopScaledDeposits += scaled;
+        pool.totalScaledDeposits += scaled;
+
+        emit BackstopCommitted(token, committed);
     }
 
     ////////////////////////

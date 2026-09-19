@@ -35,6 +35,10 @@ abstract contract Properties is BeforeAfter, Asserts {
     /// @dev per-position scaled balances must sum to the pool totals, exactly.
     /// These are raw stored integers and no rounding happens in the summation,
     /// so any drift at all is a real bookkeeping bug.
+    ///
+    /// The deposit side carries a second term: backstopScaledDeposits is the protocol's own
+    /// share of totalScaledDeposits, funded out of reserves by the liquidation backstop and
+    /// belonging to no position. Still exact equality, one more known term.
     function property_scaledBalancesReconcile() public {
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 sumDeposits;
@@ -45,7 +49,11 @@ abstract contract Properties is BeforeAfter, Asserts {
             }
 
             Desultory.Pool memory pool = desultory.getPoolInfo(tokens[i]);
-            eq(sumDeposits, pool.totalScaledDeposits, "scaled deposits must sum to pool total");
+            eq(
+                sumDeposits + pool.backstopScaledDeposits,
+                pool.totalScaledDeposits,
+                "scaled deposits plus the backstop must sum to pool total"
+            );
             eq(sumBorrows, pool.totalScaledBorrows, "scaled borrows must sum to pool total");
         }
     }
@@ -136,14 +144,30 @@ abstract contract Properties is BeforeAfter, Asserts {
     }
 
     /// @dev the property that keeps liquidation worth calling, asserted against the pure
-    /// function rather than through a whole liquidation
+    /// function rather than through a whole liquidation. Checked at BOTH shares: the
+    /// backstop path pays the protocol 70% of the bonus instead of 30%, and the liquidator
+    /// must still come out ahead at that split or nobody will ever call it.
     function property_liquidatorIsNeverWorseOff() public {
+        uint16[2] memory shares = [uint16(3_000), uint16(7_000)];
+
         for (uint256 i = 0; i < tokens.length; i++) {
             uint16 bonusBps = desultory.getTokenInfo(tokens[i]).liquidationBonusBps;
             uint256 base = 1_000e18;
             uint256 seize = LiquidationMath.seizeFromRepay(base, bonusBps);
-            (, uint256 toLiquidator) = LiquidationMath.splitBonus(base, seize, 3_000);
-            gte(toLiquidator, base, "liquidator would receive less than they paid");
+
+            for (uint256 s = 0; s < shares.length; s++) {
+                (, uint256 toLiquidator) = LiquidationMath.splitBonus(base, seize, shares[s]);
+                gte(toLiquidator, base, "liquidator would receive less than they paid");
+            }
+        }
+    }
+
+    /// @dev the protocol's own deposit line is a SUBSET of the pool's deposits, never a
+    /// parallel figure. Catches a whole class of slip where the two drift apart.
+    function property_backstopNeverExceedsDeposits() public {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            Desultory.Pool memory pool = desultory.getPoolInfo(tokens[i]);
+            lte(pool.backstopScaledDeposits, pool.totalScaledDeposits, "backstop exceeds pool deposits");
         }
     }
 }

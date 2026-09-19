@@ -47,8 +47,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - View caveat: `getPositionBorrowForToken`/`getPositionCollateralForToken`
   read stored indexes — they don't simulate accrual since `lastUpdate`.
 - Liquidations: the old `liquidateAssetPosition`/`liquidateProportionalPosition` engine
-  is gone, replaced by a single `liquidate(positionId, debtAsset, collateralAsset,
-  repayAmount)`. Flow: accrue everything, require `healthFactor < WAD`, resolve `debt`
+  is gone, replaced by a private `_liquidate(positionId, debtAsset, collateralAsset,
+  repayAmount, bool useBackstop)` behind two `nonReentrant` wrappers, `liquidate(...)` and
+  `liquidateWithBackstop(...)` (identical argument lists). Flow: accrue everything, require `healthFactor < WAD`, resolve `debt`
   in the requested `debtAsset` (`_debtInAsset`), clamp `repayAmount` down to the close
   factor (`LiquidationMath.closeFactorBps(hf)` — a partial-fill clamp, not a revert, so
   a bot that loses a race isn't burning a transaction), convert to a seize amount via
@@ -58,7 +59,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   `_debtAmountFromUSD`, then re-clamped to `debt` for rounding) — charging the original
   `repayAmount` for a short delivery would be the same class of bug as paying out the
   wrong token. `LiquidationMath.splitBonus` divides the bonus between the liquidator and
-  `pool.reserves` (`LIQ_PROTOCOL_SHARE`, 30%). `_seizeCollateral`/`_retireDebt` do the
+  `pool.reserves` (`LIQ_PROTOCOL_SHARE`, 30%, or `LIQ_BACKSTOP_SHARE`, 70%, on the
+  backstop path). `_seizeCollateral`/`_retireDebt` do the
   effects; the collateral leaves via `safeTransfer` to `msg.sender`, never protocol funds.
   `_debtValueUSD`/`_debtAmountFromUSD` are the forward/inverse pair that value a debt-asset
   amount in USD — DUSD has no `__tokenInfos` entry (no price feed) and is valued at par in
@@ -69,6 +71,21 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   remains to `totalBadDebtUSD` (`BadDebtRecorded` event) — a monotone, never-decremented
   recognition of loss. There is deliberately no `liquidityIndex` writedown anywhere: bad
   debt is counted, never socialized, so `property_indexesNeverDecrease` still holds.
+- **Internal backstop** (`useBackstop = true`): `getAvailableLiquidity` is
+  `max(0, deposits - debt)`, i.e. `max(0, cash - reserves)` under the custody identity, so
+  it under-reports spendable cash by `min(reserves, cash)` — and a pool sits with deposits
+  below debt after every accrual. `_commitBackstop(token, want)`, called from `_liquidate`
+  after `seizeCap` is clamped to held collateral and the requested amount, and before
+  `getAvailableLiquidity` is re-read fresh, converts up to `pool.reserves` into
+  `pool.backstopScaledDeposits` (a SUBSET of `totalScaledDeposits`, not a position, so
+  `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures, credit rounds
+  down, reserves fall by the exact round-trip; no token moves, so custody holds by
+  construction. `releaseBackstop(token, amount)` (owner-only) is the mirror: accrues,
+  mirrors `withdraw()`'s shape, gates on `getAvailableLiquidity` (unlike `withdrawReserves`
+  — it lowers deposits against fixed reserve backing), and returns the deposit plus its
+  earned interest to `pool.reserves`, keeping `withdrawReserves` the single exit. Events
+  `BackstopCommitted`/`BackstopReleased`. A wei-scale rounding seam is routine on this path
+  rather than rare — documented, not fixed; see `docs/Protocol/Liquidations.md` and ADR 0006.
 - **DUSD debt** is tracked entirely separately from `__pools` and is never an entry in
   `__tokenList`: `dusdBorrowIndex`, `totalScaledDusdDebt`, `dusdReserves`, and a
   per-position `__scaledDusdDebt`. `borrowDUSD` mints locally, `borrowDUSDTo` sends a
@@ -94,8 +111,16 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - `Ownable` (added with the cross-chain work; previously there was no access control at
   all). Owner-only: `setAdapter`, `setAllowedDestination(eid, bool)`,
   `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS).
-- No admin/treasury withdrawal yet; `pool.reserves` and `dusdReserves` just accumulate.
-  Token add/remove is still ungoverned.
+- `withdrawReserves(token, to, amount)` (owner-only) pays out a pool's accumulated revenue —
+  the RESERVE_FACTOR interest cut plus LIQ_PROTOCOL_SHARE of liquidation bonuses. It accrues
+  first and needs no liquidity gate: the balance and `pool.reserves` fall by the same amount,
+  so the custody identity holds by construction. `dusdReserves` is deliberately NOT
+  withdrawable — it is a claim, not a balance (DUSD is minted to borrowers and burned from
+  payers, never held here), so paying it out would mint unbacked supply. See ADR 0005.
+- `releaseBackstop(token, amount)` (owner-only) returns committed backstop capital to
+  `pool.reserves` — see the liquidation backstop above. It moves no tokens; cash still
+  leaves only through `withdrawReserves`.
+- Token add/remove is still ungoverned.
 
 ### `src/PositionNFT.sol` — `Position` ERC721
 - Token id = position id; minted by Desultory (`deposit(0, …)`). The NFT IS
