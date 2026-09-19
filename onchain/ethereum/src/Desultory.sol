@@ -921,15 +921,29 @@ contract Desultory is Ownable, ReentrancyGuard {
             amount = debt;
         }
 
+        _retireDusdDebt(positionId, amount);
+
+        __DUSD.burn(msg.sender, amount);
+        emit DusdRepay(positionId, msg.sender, amount);
+    }
+
+    /**
+     * @dev retire `amount` of a position's DUSD debt.
+     *
+     * Shared by repayDUSD and the redemption path so both reduce debt through identical
+     * arithmetic — property_dusdDebtReconciles holds by construction rather than by two
+     * independently maintained copies agreeing.
+     *
+     * The scaled reduction rounds DOWN, so the position is credited with no more relief
+     * than the payment warrants. Same direction repayDUSD used before this extraction.
+     */
+    function _retireDusdDebt(uint256 positionId, uint256 amount) private {
         uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
         if (scaled > __scaledDusdDebt[positionId]) {
             scaled = __scaledDusdDebt[positionId];
         }
         __scaledDusdDebt[positionId] -= scaled;
         totalScaledDusdDebt -= scaled;
-
-        __DUSD.burn(msg.sender, amount);
-        emit DusdRepay(positionId, msg.sender, amount);
     }
 
     /// @dev a position's debt in one asset, DUSD or a pool token
