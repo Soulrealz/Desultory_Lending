@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 5db9f71
+verified-against: d396fde
 ---
 
 # Interest Rate Model
@@ -14,6 +14,21 @@ pulled in before it is exhausted.
 
 `getUtilization(token)` is `totalDebt / totalDeposits` in BPS, capped at
 `MAX_BPS` (10 000 = 100%), and `0` for an empty pool.
+
+`totalDeposits` is `pool.totalScaledDeposits`, which since
+[[0006-internal-liquidation-backstop]] includes `pool.backstopScaledDeposits` — the
+protocol's own deposit line, funded out of reserves to let a seizure proceed against a
+cash-poor pool. So a backstop commit **lowers measured utilization**, and it does so
+exactly when the pool is most stressed: a saturated pool sitting at the 10 000 cap reads
+just under it after a commit, and borrowers pay a marginally lower rate in the extreme
+band.
+
+That is arguably correct rather than a leak — the protocol really did contribute capital,
+and the denominator should reflect it, the same way it would for any other lender's
+deposit. The magnitude is proportional to the committed amount over total debt, which is
+small, since the commit is bounded by the seizure it is unlocking. It is recorded here
+because the effect is easy to miss: it falls out of the `Pool` struct's composition rather
+than from anything in this module, which is otherwise untouched by the backstop.
 
 ## The curve
 

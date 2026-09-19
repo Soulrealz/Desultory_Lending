@@ -1,7 +1,7 @@
 # Next Steps
 
 Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module map and
-`docs/` for the vault. Written 2026-09-19, last updated against commit `7f90054` on `d2-internal-backstop`.
+`docs/` for the vault. Written 2026-09-19, last updated against commit `d396fde` on `master`.
 
 ## START HERE
 

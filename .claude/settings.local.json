@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(forge --version)",
+      "Bash(forge build *)",
+      "Bash(forge test *)",
+      "Bash(PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 forge test)",
+      "Bash(git checkout *)",
+      "Bash(xargs -0 dos2unix -q)",
+      "Bash(xargs -0 sed -i 's/\\\\r$//')",
+      "Bash(git rm *)",
+      "Bash(git update-index *)",
+      "Bash(PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 forge test --match-contract PositionTest)",
+      "Bash(PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 forge test --match-contract DesultoryTest)",
+      "Bash(PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 forge test --match-test \"testNftTransfer|testUnhealthy\" -vv)",
+      "Bash(PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 forge test --match-test testFuzz -vv)"
+    ]
+  }
+}
