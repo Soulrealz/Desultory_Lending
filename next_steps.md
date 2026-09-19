@@ -1,7 +1,7 @@
 # Next Steps
 
 Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module map and
-`docs/` for the vault. Written 2026-09-19, against commit `9652fd5` on `master`.
+`docs/` for the vault. Written 2026-09-19, last updated against commit `422dd17` on `master`.
 
 ## Where the project is
 
@@ -14,15 +14,16 @@ projects were planned; all four are now merged:
 | B | Chimera stateful fuzzing harness (`test/recon/`) | done |
 | C | Cross-chain DUSD borrowing over LayerZero V2 | done |
 | D1 | Liquidation engine rewrite | done — merged 2026-09-13 |
+| D2.1 | Treasury slice: owner-gated reserve withdrawal | done — merged 2026-09-19 |
 
 The June 2026 assessment's "suggested order of attack" (`docs/Audit/2026-06-10-project-assessment.md`)
 is fully worked through. What remains are the D follow-ons, the DUSD peg, governance,
 and the admin gap described below.
 
-Baseline: **82 tests passing** across 8 suites. `Desultory` runtime 15,549 bytes
-(limit 24,576). Medusa and Echidna campaigns green.
+Baseline: **88 tests passing** across 8 suites. `Desultory` runtime 16,044 bytes
+(limit 24,576). Medusa 21/21 and Echidna 22/22 green.
 
-## Do this next: D2, starting with the treasury slice
+## Do this next: D2's internal backstop
 
 ### Why this and not something else
 
@@ -36,46 +37,30 @@ other open limitation is cosmetic next to it. See **Known limitations** in
 D2 as the README decomposes it has two halves:
 
 - **Internal backstop** — the protocol covers the liquidation from its own funds when it
-  has them, taking a larger share of the reward.
+  has them, taking a larger share of the reward. **This is the next piece.**
 - **External backstop** — the protocol flash-loans from an outside venue (Uniswap, Aave)
-  to cover, taking a partial reward.
+  to cover, taking a partial reward. Largest piece, real external integrations, worth its
+  own spec.
 
-**The internal half is blocked on plumbing that does not exist**, which is why the
-treasury slice comes first.
+The treasury slice that unblocked this is **done** (ADR 0005). `withdrawReserves(token,
+to, amount)` is owner-gated, accrues first, and needs no liquidity gate because the balance
+and `pool.reserves` fall together, so the custody identity holds by construction.
+`dusdReserves` was deliberately left unwithdrawable — it is a claim, not a balance, and
+paying it out would mint unbacked DUSD. That decision is C2's to revisit.
 
-### The treasury gap, and why D1 made it worse
+### What the internal backstop has to settle
 
-There is **no way to withdraw `reserves` or `dusdReserves`**, and no owner function for it.
-The only three owner-gated functions on `Desultory` are `setAdapter`,
-`setAllowedDestination` and `setDusdStabilityFee` — all cross-chain config.
-
-Value now accrues to reserves from three places:
-
-| Source | Line | Rate |
-|---|---|---|
-| Borrow interest | `Desultory.sol:1074` | `RESERVE_FACTOR` = 10% of interest |
-| DUSD stability fee | `Desultory.sol:628` | 100% of the fee (no DUSD depositors to share with) |
-| Liquidation bonus | `Desultory.sol:587` | `LIQ_PROTOCOL_SHARE` = 30% of every bonus |
-
-Before D1 there were two streams. D1 added the third. The protocol accumulates from all
-three and can release none of it — the value is permanently stuck, and an internal
-backstop cannot be specified until reserves are addressable.
-
-There is also still no token add/remove admin (`grep -c "function addToken" src/Desultory.sol`
-→ 0), so the supported-asset set is fixed at deployment. That is a separate gap; do not
-fold it in unless the design turns out to need it.
-
-### Suggested shape
-
-1. **Treasury slice** (small, unblocks the rest): owner-gated withdrawal of `reserves`
-   per token and of `dusdReserves`, with the accounting care the rest of this contract
-   uses — withdrawing reserves must not let the pool's cash drop below what depositors
-   and borrowers are owed. `property_custodyReconciles` in `test/recon/Properties.sol`
-   is the invariant that pins this; it must still hold.
-2. **Internal backstop**: liquidation draws on reserves when the pool lacks cash, with a
-   larger protocol share of the bonus as the README specifies.
-3. **External backstop**: flash-loan adapters. Largest piece, real external integrations,
-   worth its own spec.
+- Where the covering funds come from. `pool.reserves` is the obvious pot and it is now
+  addressable, but *spending* it inside a liquidation is a different problem from paying
+  it out.
+- What "a larger share of the reward" means numerically, and whether it comes out of the
+  liquidator's bonus or is charged to the position.
+- Whether the backstop fires automatically when `getAvailableLiquidity` binds, or is a
+  separate entry point a caller opts into.
+- What happens when reserves cannot cover it either — presumably the same partial fill D1
+  already does, but it must be stated rather than inherited by accident.
+- Whether `property_custodyReconciles` still holds when reserves are spent rather than
+  withdrawn. It is the invariant governing this area and it must not be weakened.
 
 Brainstorm before coding — this is architectural, not bounded.
 
@@ -90,6 +75,10 @@ Brainstorm before coding — this is architectural, not bounded.
   extension point.
 - **Governance.** `src/governance/VoteToken.sol` is a bare OFT. Staking, boosting,
   slashing all unimplemented. Greenfield; nothing depends on it.
+- **Token add/remove admin.** `grep -c "function addToken" src/Desultory.sol` → 0, so the
+  supported-asset set is fixed at deployment. Named alongside reserve withdrawal as a
+  single gap in the June assessment; only the reserve half is closed. Has its own design
+  question — what happens to open positions in a removed asset.
 
 ## Parked from D1 — small, none urgent
 
@@ -162,7 +151,7 @@ Examples from the log: `rewrite the liquidation engine`, `update docs`,
   `Accounting`, `Interest-Rate-Model`, `Positions`, `Oracles`, `Liquidations`, `Cross-Chain`.
 - `docs/Decisions/` — numbered ADRs. `0001` NFT-as-position, `0002` internal-consistency
   invariants (superseded in part by `0004`), `0003` DUSD-only cross-chain borrowing,
-  `0004` liquidation engine.
+  `0004` liquidation engine, `0005` treasury withdrawal.
 - `docs/Audit/` — `Invariants.md` (the eleven fuzzing properties in prose) and the June
   project assessment.
 - `docs/Notes/` — scratch. Makes no accuracy claim.
