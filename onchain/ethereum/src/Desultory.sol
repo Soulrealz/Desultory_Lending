@@ -950,11 +950,11 @@ contract Desultory is Ownable, ReentrancyGuard {
     /**
      * @dev retire `amount` of a position's DUSD debt.
      *
-     * Shared by repayDUSD and the redemption path so both reduce debt through identical
-     * arithmetic. It is not the only copy: _retireDebt's DUSD branch carries a third,
-     * verbatim inline duplicate, used by liquidate() when debtAsset == DUSD. The three
-     * agree today, and property_dusdDebtReconciles depends on them continuing to — a
-     * change here has to be mirrored there.
+     * The single place a position's DUSD debt is reduced. Three callers: repayDUSD, the
+     * redemption path, and _retireDebt's DUSD branch (liquidate() with
+     * debtAsset == DUSD), which used to carry a verbatim inline copy of these five lines.
+     * property_dusdDebtReconciles depends on all DUSD retirement sharing one arithmetic,
+     * so keep it that way rather than inlining a fourth.
      *
      * The scaled reduction rounds DOWN, so the position is credited with no more relief
      * than the payment warrants. Same direction repayDUSD used before this extraction.
@@ -1168,15 +1168,11 @@ contract Desultory is Ownable, ReentrancyGuard {
      */
     function _retireDebt(uint256 positionId, address asset, uint256 amount) private {
         if (asset == address(__DUSD)) {
-            // this branch is an inline copy of _retireDusdDebt, which repayDUSD and the
-            // redemption path share. Keep the two in step — property_dusdDebtReconciles
-            // assumes every DUSD retirement uses this same arithmetic.
-            uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
-            if (scaled > __scaledDusdDebt[positionId]) {
-                scaled = __scaledDusdDebt[positionId];
-            }
-            __scaledDusdDebt[positionId] -= scaled;
-            totalScaledDusdDebt -= scaled;
+            // the arithmetic lives in _retireDusdDebt, shared with repayDUSD and the
+            // redemption path — property_dusdDebtReconciles assumes every DUSD
+            // retirement goes through it. Only the settlement differs: a burn here and
+            // in repayDUSD, nothing in redemption, which burns at its own entry point.
+            _retireDusdDebt(positionId, amount);
 
             __DUSD.burn(msg.sender, amount);
         } else {
