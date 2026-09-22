@@ -52,9 +52,18 @@ A decrease would mean someone's deposit or debt shrank without a transaction, wh
 nothing in the design permits.
 
 **3. `borrowIndex` outpaces `liquidityIndex`.**
-Both start at `WAD`. Debt can never exceed deposits, and the reserve factor removes
-10% from the lender side before the liquidity index grows, so borrow growth strictly
-dominates. This is a consequence of the model rather than a restatement of the code,
+Both start at `WAD` and both move out of the same charge: borrowers are charged
+`interest`, and lenders receive only `interest - toReserves`. What holds the ordering is
+the pair of ceilings ADR 0008 put in the distribution step. Lenders are credited only
+when `interest > 0`, which requires `borrowIndex` to have moved first; the ceiling cut
+then withholds at least 1 wei of every charge, and the `totalDeposits` divisor ceilings
+so the credit is never spread over an understated base.
+
+Two things this statement used to say and no longer does. *Debt can never exceed
+deposits* is not a standing invariant — borrowing is bounded by `getAvailableLiquidity`,
+but seizure and the backstop can leave a pool saturated past its deposit base. And no
+deficit threshold is required to break it: ADR 0008 inverted the indexes at
+`deposits == debt == 3` scaled. This is a consequence of the model rather than a restatement of the code,
 which is what makes it worth asserting — and it is the property used as the negative
 control, because inverting it must fail the moment any interest accrues.
 
@@ -284,17 +293,20 @@ hand, not by the fuzzer.
 A wei-scale rounding seam was found and deliberately left in place rather than
 patched: the availability bound is computed in token units, but `_seizeCollateral`
 converts with `__toScaledUp` (rounds up), so a seizure that exactly saturates the cap
-can leave a pool's deposits 1–2 wei below its debt. It cannot trigger invariant 3
-(which needs roughly a 10% deficit) and is recorded as a known limitation in
-[[Liquidations]] rather than fixed with an unexplained `-1`.
+can leave a pool's deposits 1–2 wei below its debt. It cannot trigger invariant 3 — not because a couple of wei is under some deficit
+threshold, which is the framing ADR 0008 falsified, but because the ceiling cut withholds
+at least a wei of every charge and a 2-wei gap on a pool that size is ~4e-12 relative. It
+is recorded as a known limitation in [[Liquidations]] rather than fixed with an
+unexplained `-1`.
 
 **The backstop widened that seam, and the docs were corrected rather than the code.**
 `liquidateWithBackstop` sets the seizure cap to precisely the availability the commit
 just unlocked, so the "exactly saturates the cap" precondition holds on *every* call on
 that path rather than occasionally — and `_commitBackstop`'s own down-rounding adds a
 second floor in the same direction. A deterministic 2-wei shortfall was observed against
-a ~449,740-token pool. None of the properties here can see it: invariant 3 needs a ~10%
-deficit, invariant 5 holds because `getUtilization` clamps at `MAX_BPS`, and invariant 4
+a ~449,740-token pool. None of the properties here can see it: invariant 3 is held by the roundings
+with twelve orders of magnitude of headroom at this pool size (the restated argument is
+in [[Liquidations]]), invariant 5 holds because `getUtilization` clamps at `MAX_BPS`, and invariant 4
 is a `gte` whose right-hand side the shortfall moves *down*, so the rounding runs in the
 property's favour. The unit test
 `testBackstopLeavesDepositsCoveringDebtWithinRoundingDust` therefore asserts the

@@ -279,10 +279,22 @@ etc.) is out of scope for this project.
   second floor in the same direction, bounded by `liquidityIndex / WAD`. Observed in
   testing: a deterministic **2-wei shortfall** against a ~449,740-token pool.
 
-  It is still not worth patching, and nothing it can reach cares.
-  `property_borrowIndexOutpacesLiquidityIndex` needs roughly a 10% deficit, not a couple
-  of wei. `property_utilizationNeverExceeds100` holds because `getUtilization` clamps at
-  `MAX_BPS`. `property_custodyReconciles` is a `gte` whose right-hand side the shortfall
+  It is still not worth patching, and nothing it can reach cares — but the argument for
+  that had to be restated, because the version it used to rest on ("invariant 3 needs
+  roughly a 10% deficit, not a couple of wei") is false as a general claim. ADR 0008
+  inverted the indexes at a **zero** deficit. See "Superseded framings" below.
+
+  Restated against what invariant 3 actually rests on, the seam survives.
+  `accrue()` credits lenders only when `interest > 0`, which requires `borrowIndex` to
+  have moved first; the ceiling cut then withholds at least 1 wei, so the lender side
+  receives at most `interest - 1` spread over a deposit base that ceilings rather than
+  floors. Against a ~449,740-token pool a 2-wei gap is ~4e-12 in relative terms, inside
+  that headroom by twelve orders of magnitude. What the restatement costs is generality:
+  the argument is now explicitly about the gap's size *relative to the pool*, not about
+  2 wei being small in absolute terms, so it does not carry to a dust-scale pool where a
+  couple of wei is the whole base. That regime is held by ADR 0008's two roundings, not
+  by this paragraph. `property_utilizationNeverExceeds100` holds because `getUtilization`
+  clamps at `MAX_BPS`. `property_custodyReconciles` is a `gte` whose right-hand side the shortfall
   moves *down*, so the rounding runs in the property's favour. Accordingly
   `test/Desultory.t.sol:testBackstopLeavesDepositsCoveringDebtWithinRoundingDust` asserts
   the shortfall is dust (≤ 10 wei) rather than zero, and says why. Invisible to every
@@ -311,6 +323,22 @@ etc.) is out of scope for this project.
   down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while
   `pool.reserves` rises by exactly `amount`. The property's right-hand side is
   non-increasing across a release.
+
+## Superseded framings
+
+Accepted ADRs are never edited, so two of them still carry a justification this note no
+longer accepts. Recorded here rather than by touching them:
+
+- [[0004-liquidation-engine]] describes the wei-scale seizure seam as unreachable by a
+  property "that needs roughly a 10% deficit".
+- [[0006-internal-liquidation-backstop]] repeats the same figure when arguing the
+  widened seam is invisible to `property_borrowIndexOutpacesLiquidityIndex`.
+
+Both are **superseded by [[0008-reserve-cut-rounds-up]]**, whose second reproduction
+inverted the two indexes at `deposits == debt == 3` scaled — a zero deficit — on rounding
+alone. A deficit threshold was never what the property rested on. The conclusions those
+two ADRs reach about the seam still stand; only the reason does. Read the restated
+version under Known limitations above.
 
 ## History: the seven defects of the old engine
 

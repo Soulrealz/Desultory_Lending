@@ -69,8 +69,9 @@ the indexes, so depositors earn nothing while nobody is borrowing. Correct, and
 easy to get wrong.
 
 **The reserve cut is taken before lenders, and it rounds UP.** `RESERVE_FACTOR` is
-`1_000` BPS = 10%. Ten percent of accrued interest goes to `pool.reserves`; the remaining
-90% grows `liquidityIndex`.
+`1_000` BPS = 10%. Because the cut ceilings, *at least* ten percent of accrued interest
+goes to `pool.reserves` and at most the remaining 90% grows `liquidityIndex` — and for any
+interest below 10 wei the cut takes the whole of it.
 
 The ceiling is load-bearing rather than cosmetic. Invariant 3
 (`property_borrowIndexOutpacesLiquidityIndex`, see [[Invariants]]) is *justified* by this
