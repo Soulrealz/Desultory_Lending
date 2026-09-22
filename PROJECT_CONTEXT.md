@@ -285,9 +285,16 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   **in-target** rather than as a property (`dusdBurned >= USD value of collateral the
   redeemer received`): the spec's "redemption never lowers the target's health factor"
   turned out to be unassertable, because `redeem` accrues internally so a before/after
-  comparison charges realized interest to the redemption. Two coverage limitations are
-  recorded in `docs/Audit/Invariants.md` and must not be read past —
-  `desultory_redeemWithBackstop` fired **zero** times in 300,000 Medusa calls.
+  comparison charges realized interest to the redemption. `warp` was found to be leaving BOTH price feeds stale
+  (`OracleLib.TIMEOUT` is 3 hours, `MAX_WARP` is 30 days), so almost every price-reading
+  target — borrow, repay, withdraw, redeem, liquidate — reverted for the rest of each
+  sequence: the campaigns were green largely because nothing was executing. `warp` now
+  re-posts each feed's current answer, price untouched. With that fixed, redemption target
+  selection was tightened, the redemption amount bound raised to the redeemer's balance so
+  `_redeem`'s two clamp branches are reachable, `desultory_saturatePool` was added to drive
+  a pool short on purpose, and `desultory_releaseBackstop`'s bound was re-derived to survive
+  the accrual the call itself performs. Measurements and the before/after counters are in
+  `docs/Audit/Invariants.md`; read that before trusting any campaign count.
   `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
   **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding

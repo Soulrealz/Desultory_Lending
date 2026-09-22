@@ -80,7 +80,7 @@ Desultory_Lending/
             │   ├── Setup.sol           # Deploys the system as Deploy.s.sol does, plus 3 actors
             │   ├── BeforeAfter.sol     # Per-token state snapshots around every call
             │   ├── Properties.sol      # The twelve internal-consistency invariants
-            │   ├── TargetFunctions.sol # Clamped call surface incl. liquidate and redeem; liquidator actor never opens a position
+            │   ├── TargetFunctions.sol # Clamped call surface incl. liquidate, redeem and saturatePool; warp re-posts feeds so prices never go stale; liquidator actor never opens a position
             │   ├── CryticTester.sol    # Fuzzer entrypoint
             │   ├── CryticToFoundry.sol # Replays counterexamples as Foundry tests
             │   └── AccrualLeak.t.sol   # Regression test for the accrual leak the fuzzer found

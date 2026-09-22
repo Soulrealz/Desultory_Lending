@@ -168,28 +168,89 @@ That class is covered by `testRedeemImprovesTheTargetHealthFactor` in
 `test/Desultory.t.sol` as a unit test, where no time passes between the snapshot and the
 call, and by nothing in the fuzzer.
 
-### Two coverage limitations on the redemption surface
+### The stale-feed hole: most of the harness was dead
 
-Do **not** read the headline fuzzer counts as coverage of redemption.
+The redemption surface was known to be thinly covered, and was recorded here as two
+limitations local to redemption. Investigating them found a cause that was **not** local to
+redemption and was much worse than the symptom.
 
-1. **`desultory_redeemWithBackstop`'s real call fired zero times across 300,000 Medusa
-   calls.** Four preconditions must align — the position healthy, holding DUSD debt,
-   holding the chosen collateral, and the pool short enough to need the backstop — and the
-   last two pull against each other, since a pool that cannot spare collateral is usually
-   one where the position is not comfortably healthy in it. The backstopped redemption path
-   is covered by its five unit tests in `test/Desultory.t.sol` — the fifth being
-   `testOneWeiBackstoppedRedeemCommitsNothing`, which pins the zero-delivery guard — and
-   **effectively not by the fuzzer at all**. The precondition is not relaxable:
-   `healthFactor >= WAD` *is* the feature. The zero-delivery case is a subset of this
-   one, so the fuzzer never reached it either; the unit test named above pins it.
-2. **`desultory_redeem` fired 14 times at `--test-limit 50000`** (25 at 300,000). Non-zero,
-   and thin. A campaign that reports the target as "passing" is reporting mostly that its
-   preconditions were not met.
+`warp` advanced `block.timestamp` by up to `MAX_WARP` = 30 days and did nothing else. Every
+price read goes through `OracleLib.staleCheckLatestRoundData`, whose `TIMEOUT` is **3
+hours**. So a single `warp` left *both* feeds stale, and every target that reads a price —
+`borrow`, `repay`, `withdraw`, `redeem`, liquidation, and every `healthFactor` precondition
+— reverted for the remainder of the sequence, unless the fuzzer happened to draw
+`oracle_setPrice` for each of the two tokens before warping again.
+
+Measured on a uniform driver over 8,000 calls against the harness as it stood:
+
+| target | succeeded | reverted |
+|---|---|---|
+| `desultory_borrow` | **0** | 739 |
+| `desultory_borrowDUSD` | **0** | 754 |
+| `desultory_repay` | **0** | 755 |
+| `desultory_withdraw` | **0** | 722 |
+| `desultory_redeem` | **0** | 749 |
+
+`deposit` and `warp` were the only things reliably working. The campaigns were green
+because nothing was happening, and the properties were being evaluated against a state
+almost nothing had moved.
+
+The fix is the one `test/Desultory.t.sol`'s `_saturatedUsdcPool` already used for the same
+reason: `warp` re-posts each feed's **current** answer, refreshing the timestamp without
+touching the price. `oracle_setPrice` remains the only thing that moves a price.
+
+### What was done about the redemption paths
+
+With feeds live, four further changes made the dead paths reachable. None of them relaxes a
+gate: **`healthFactor >= WAD` is untouched on both redemption targets** — that gate is the
+feature, not an obstacle.
+
+- **Target selection.** The four preconditions were each drawn from an independent seed, so
+  their conjunction essentially never held. The redeemer is now drawn from actors that hold
+  DUSD, the position from those that carry DUSD debt, and the collateral from what the
+  position actually holds. Same class of clamp as the existing `_borrowCapacityInToken`.
+- **The amount bound.** Both targets bounded input with `between(amount, 1, min(debt,
+  balance))`, which can never exceed the debt, so `_redeem`'s clamp-to-debt branch and its
+  re-clamp were unexecutable by construction. The bound is now the redeemer's balance: the
+  final burn is at most `min(amount, debt) <= balance`, so over-asking is legal (the engine
+  fills partially) and always payable.
+- **`desultory_saturatePool`**, the harness form of `_saturatedUsdcPool`: draw the pool down
+  to its last thousandth of available liquidity, then let time run. The thousandth is the
+  point — drawing to exactly zero makes reserves and the deposit deficit grow together, so
+  `_commitBackstop`'s guard fires and the commit buys nothing.
+- **`desultory_releaseBackstop`'s bound** was computed from a snapshot taken *before* the
+  call, but `releaseBackstop` accrues on its way in, and accrual grows debt faster than
+  deposits every time. The bound now subtracts a conservative upper bound on that growth,
+  `debt * rate * dt / (SECONDS_PER_YEAR * MAX_BPS) + 2`, all from public getters. It was
+  succeeding 1 attempt in 5; it now succeeds on every attempt it makes.
+
+Counter evidence, same 8,000-call driver both sides (lcov was not used — see below):
+
+| counter | before | after |
+|---|---|---|
+| `redeem` succeeded | 17 | 60 |
+| `redeem` clamp-to-debt fired | **0** | 41 |
+| `redeemWithBackstop` succeeded | 39 | 298 |
+| `redeemWithBackstop` clamp-to-debt fired | **0** | 209 |
+| `_redeem` re-clamp (`removed > cap`) | 28 | 268 |
+| backstop commit reached in a redemption | 27 | 253 |
+| `releaseBackstop` succeeded / attempted | **1 / 5** | 41 / 41 |
+| `borrowDUSD` succeeded | 153 | 413 |
+
+Under Medusa at a 4,000,000 test limit with the same instrumentation, all eight paths fire
+after the change; before it, the five marked **0** above never fired at all. At the routine
+50,000 budget the old harness fired none of the eight.
+
+The lesson is [[0008-reserve-cut-rounds-up]]'s, restated from the other direction: a green
+fuzz run is not a proof. There it was green while a reachable defect remained; here it was
+green because the campaign was barely executing the protocol. **Both times the green came
+from the harness, not from the code.** Before trusting a campaign, check that its targets
+are landing.
 
 Also worth carrying forward: **lcov line coverage on this harness is unreliable.** It
 reported non-zero hits on lines *after* a zero-hit call site, which cannot be true. Counter
-instrumentation was used instead. Whoever next reaches for coverage numbers here should not
-trust lcov.
+instrumentation was used instead, added temporarily and removed before committing. Whoever
+next reaches for coverage numbers here should not trust lcov.
 
 ## Deliberately not asserted
 

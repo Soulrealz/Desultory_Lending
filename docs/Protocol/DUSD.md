@@ -232,8 +232,10 @@ Token reserves in `pool.reserves` are a different thing entirely and do leave, t
   pool, the backstopped one can, the fee lands in reserves, custody holds, and a one-wei
   backstopped redemption commits nothing).
 - `test/recon/` — `desultory_redeem` and `desultory_redeemWithBackstop` on the fuzzing
-  surface, with an in-target assertion. Read [[Invariants]] before trusting the counts:
-  the backstopped target fired **zero** times in 300,000 calls.
+  surface, with an in-target assertion. The backstopped target used to fire **zero** times
+  in 300,000 calls; both it and the two clamp branches are now reachable, after `warp` was
+  found to be leaving the price feeds stale and killing most of the harness. Read
+  [[Invariants]] for the measurements before trusting any count here.
 
 ## Related
 
