@@ -5,68 +5,33 @@ Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module ma
 
 ## START HERE
 
-**`property_borrowIndexOutpacesLiquidityIndex` is failing, on `master`, in shipped code.**
+**Brainstorm D2's external liquidation backstop** — flash-loaning the shortfall from an
+outside venue (Uniswap, Aave) to cover a liquidation when the pool genuinely holds nothing.
+It has not been started: no spec, no plan, no code. See `## Do this next` below.
 
-This is a reproduced assertion failure in already-merged core accrual, not a possible edge
-case and not something the redemption branch introduced. It is the most important open
-item in the repository and it is why the D2 work below is no longer the first thing to do.
+The accrual failure that stood here is **fixed** — see the next section. Nothing is
+currently red.
 
-**Verified both ways, first-hand:**
+### The accrual bug that was here, and what closed it
 
-| Where | Command | Result |
-|---|---|---|
-| `master` @ `542f710`, none of the redemption code | `medusa fuzz --test-limit 120000` | 23 passed, **1 failed** |
-| branch `c2-dusd-redemption` | `medusa fuzz --test-limit 50000` | 25 passed, **1 failed** |
+`property_borrowIndexOutpacesLiquidityIndex` was failing on `master`, in shipped code. It
+is fixed by [[0008-reserve-cut-rounds-up]] and Medusa is green again.
 
-Same property both times. The branch only supplied a corpus rich enough to reach it
-faster. Two independent minimal reproductions contain **zero redemption calls** — only
-`desultory_deposit`, `oracle_setPrice`, `desultory_borrow`, `desultory_repay`.
+Root cause worth remembering, because it is the most instructive defect this project has
+produced: **the invariant's own justification was load-bearing code.** `Properties.sol`
+justifies the property by saying the reserve factor removes 10% from the lender side on
+every accrual, so borrow growth dominates. But `toReserves = interest * 1_000 / 10_000`
+*floored*, so for any `interest` below 10 wei it removed **nothing** — and in a dust-scale
+pool one wei of ceiling-manufactured interest then moved `liquidityIndex` by `1/51` while
+the genuine rate moved `borrowIndex` by a third of that. The indexes inverted on a single
+accrual.
 
-**Mechanism**, derived from `accrue()`:
+The fix is one line — the cut now ceilings — plus a regression test beside the original
+accrual-leak test. Medusa went from 25 passed / 1 failed to **26 passed / 0 failed**.
 
-```
-liquidityIndex growth = (interest - toReserves) / totalDeposits  = 0.9*i / D
-borrowIndex   growth  = factor                                   ~ i / B
-```
-
-`liquidityIndex` outpaces `borrowIndex` exactly when `0.9*B > D` — the same condition ADR
-0004 names as the reason the seizure availability bound exists.
-
-**The economic path cannot reach that state.** From `D0 = B0`, deposits track
-`Dn = 0.9*Bn + 0.1*P`, which stays above `0.9*Bn` forever, and `borrow`/`withdraw` both
-gate on `D >= B`. **What reaches it is dust.**
-`totalDeposits = __fromScaledDown(51, liquidityIndex)` floors to a single-digit integer,
-and `liquidityIndex * (interest - toReserves) / totalDeposits` against a denominator that
-small blows the index up in one step. The reported failing pool state —
-`totalScaledDeposits: 51`, `reserves: 0` — matches exactly.
-
-**Evidence, logs and both call sequences:**
-`.superpowers/sdd/2026-09-19-dusd-redemption/evidence/` (`medusa_run4_*`, `medusa_run5_*`,
-and the `*_no_redeem*.json` sequences).
-
-**What to do.** Reproduce it first — replay a sequence through
-`test/recon/CryticToFoundry.sol` and get it failing as a Foundry test before touching
-anything. Then decide whether the answer is a minimum-deposit floor, a guard on a
-degenerate `totalDeposits` denominator in `accrue()`, or something else; that is a design
-question and `accrue()` is the most load-bearing function in the protocol, so it gets
-`superpowers:brainstorming` before it gets a patch. Do not fold it into an unrelated
-branch — this is the third real defect the harness has caught and it deserves its own
-record.
-
-After that, the next piece of *feature* work is **D2's external liquidation backstop** —
-flash-loaning the shortfall from an outside venue to cover a liquidation. It has not been
-started (no spec, no plan, no code) and it was the START HERE item until the failure above
-displaced it. Its brief is under "Second: D2's external backstop" below; classify it
-**architectural**, brainstorm before coding, and read `docs/Protocol/Liquidations.md`'s
-Internal backstop section and ADR 0006 first.
-
-Spec and plan paths follow the user's global convention, under the gitignored
-`docs/superpowers/specs/` and `docs/superpowers/plans/`.
-
-Do not touch `accrue()` casually, do not weaken a fuzzing invariant, and do not write down
-`liquidityIndex` — see the conventions section near the end of this file. (The START HERE
-item *is* a change to `accrue()`'s neighbourhood. That is exactly why it gets a design
-session rather than a patch.)
+That makes the Chimera harness **three for three** on real defects in reviewed, merged
+code, and for the first time all three are closed. Evidence for the original finding:
+`.superpowers/sdd/2026-09-19-dusd-redemption/evidence/`.
 
 ## Where the project is
 
@@ -85,18 +50,17 @@ were planned and all four are merged; their follow-on slices are tracked here to
 | C2.1 | DUSD redemption (the peg floor) | done — this branch |
 | C2.2 | DUSD supply caps | not started |
 | C2.3 | The `dusdReserves` outlet | not started — unblocked in principle by C2.1 |
+| — | Dust-pool index inversion in `accrue()` | fixed — ADR 0008 |
 
 The June 2026 assessment's "suggested order of attack" (`docs/Audit/2026-06-10-project-assessment.md`)
 is fully worked through. What remains are the D follow-ons, the rest of the DUSD peg,
-governance, the admin gap described below — and, ahead of all of them, the accrual failure
-in START HERE.
+governance and the admin gap described below.
 
-Baseline: **120 tests passing** across 9 suites. `Desultory` runtime 18,222 bytes
-(limit 24,576). Echidna **27/27** at `--test-limit 30000`. Medusa is **25 passed, 1
-failed** at `--test-limit 50000` — the failure is the START HERE item above and is
-pre-existing on `master`, not a regression.
+Baseline: **122 tests passing** across 9 suites. `Desultory` runtime 18,277 bytes
+(limit 24,576). Medusa **26 passed, 0 failed** at `--test-limit 50000`; Echidna **27/27**
+at `--test-limit 30000`. Nothing is red.
 
-## Second: D2's external backstop
+## Do this next: D2's external backstop
 
 ### Why this and not something else
 
@@ -109,10 +73,8 @@ holds nothing, and no amount of internal bookkeeping fixes it. That case needs o
 capital.
 
 It is also the last piece of D2, and it is the largest one: the protocol's first real
-external integration. Every other *feature* item (below) is either blocked on a design
-that does not exist yet or is cosmetic next to a liquidation that cannot execute — but the
-accrual failure in START HERE outranks all of it, because it is a live defect rather than
-a missing capability.
+external integration. Every other item below is either blocked on a design that does not
+exist yet or is cosmetic next to a liquidation that cannot execute.
 
 ### What the external backstop has to settle
 

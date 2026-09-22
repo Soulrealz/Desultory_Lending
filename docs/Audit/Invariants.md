@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2502b9a
+verified-against: 2df55c5
 ---
 
 # Invariants
@@ -230,40 +230,51 @@ this harness has found in reviewed code, after the accrual leak above — the ar
 for running it before the cross-chain work extends the accounting, made in
 [[0002-internal-consistency-invariants]], has now paid off twice.
 
-**`property_borrowIndexOutpacesLiquidityIndex` is failing again, and this time nothing
-was fixed.** This is the **third** real defect this harness has caught in reviewed,
-merged code, after the accrual leak and the unbounded seizure above — and it is the only
-one still open.
+**`property_borrowIndexOutpacesLiquidityIndex` failed a third time, and the cause was
+this document's own justification for it.** That makes three real defects this harness has
+caught in reviewed, merged code, after the accrual leak and the unbounded seizure above.
+All three are now closed.
 
-It is **confirmed on `master`**, with none of the redemption work present: `master` at
-`542f710`, `medusa fuzz --test-limit 120000` → 23 passed, **1 failed**, the same property.
-On the redemption branch it reproduces faster (`--test-limit 50000` → 25 passed, 1 failed)
-because that branch supplied a richer corpus, not because it introduced anything. Two
-independent minimal reproductions contain **zero redemption calls** — only
+It was **confirmed on `master`**: `master` at `542f710`, `medusa fuzz --test-limit 120000`
+-> 23 passed, **1 failed**. Two independent minimal reproductions contained only
 `desultory_deposit`, `oracle_setPrice`, `desultory_borrow`, `desultory_repay`.
 
-Mechanism, from `accrue()`:
+Root cause: the premise stated at the top of invariant 3 — *the reserve factor removes 10%
+from the lender side, so borrow growth strictly dominates* — stopped holding at dust scale.
+`toReserves = interest * RESERVE_FACTOR / MAX_BPS` **floored to zero for any `interest`
+below 10 wei**, so the reserve factor removed nothing and lenders took the whole accrual.
 
-```
-liquidityIndex growth = (interest - toReserves) / totalDeposits  = 0.9*i / D
-borrowIndex   growth  = factor                                   ~ i / B
-```
+It compounded with a second rounding: `interest` is the difference of two *ceilings* of
+`totalScaledBorrows * borrowIndex / WAD`, so a minuscule `borrowIndex` move still ticks it
+a full wei — interest manufactured by rounding rather than earned at the rate, all of it
+then landing on the lender side.
 
-so `liquidityIndex` outpaces `borrowIndex` exactly when `0.9*B > D` — the same condition
-[[0004-liquidation-engine]] names as the reason the seizure availability bound exists.
+One accrual against the failing state's own figures (51 scaled deposits, 45 scaled
+borrows) was enough to invert the indexes:
 
-The **economic** path cannot reach it. From `D0 = B0`, deposits track
-`Dn = 0.9*Bn + 0.1*P`, which stays above `0.9*Bn` forever, and `borrow`/`withdraw` both
-gate on `D >= B`. What reaches it is **dust**:
-`totalDeposits = __fromScaledDown(51, liquidityIndex)` floors to a single-digit integer,
-and `liquidityIndex * (interest - toReserves) / totalDeposits` against that denominator
-blows the index up in one step. The reported failing pool state — `totalScaledDeposits:
-51`, `reserves: 0` — matches exactly.
+| | growth in one 3-day accrual |
+|---|---|
+| `borrowIndex` | +0.768%, the genuine rate |
+| `liquidityIndex` | +1.9608%, exactly `1/51` |
+| `reserves` | 0 |
 
-Not fixed here: it is a defect in core accrual, and folding a fix for it into a redemption
-branch would have buried it. Evidence, logs and both call sequences:
-`.superpowers/sdd/2026-09-19-dusd-redemption/evidence/`. It is the START HERE item in
-`next_steps.md`.
+The inversion was **transient** — `borrowIndex` compounds back ahead within ~16 further
+accruals and stays there, a 51-wei deposit grows to 70 over 40 rounds rather than
+outrunning the index, and invariant 4 held throughout (`6 + 46 >= 52 + 0`). So it was an
+ordering violation in dust-scale pools, not a share-inflation attack.
+
+**Fixed**: the reserve cut now rounds **up** —
+`(interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS` — so it withholds something on every
+accrual with any interest at all, which is what invariant 3's premise requires.
+`toReserves <= interest` still holds for every `interest >= 1`, so the accrual leak above
+cannot return; `test_singleAccrualDistributesMoreThanItCharges` still reports a total leak
+of 0. Regression test:
+`test_dustPoolDoesNotLetLiquidityIndexOvertakeBorrowIndex`, in the same file as the leak
+test. Reasoning and rejected alternatives: [[0008-reserve-cut-rounds-up]].
+
+The lesson worth keeping: this invariant's justification was load-bearing *code*, not
+commentary. The reserve factor was doing the work the proof claimed, right up until integer
+division stopped it, and nothing else in the system noticed.
 
 A wei-scale rounding seam was found and deliberately left in place rather than
 patched: the availability bound is computed in token units, but `_seizeCollateral`
@@ -296,9 +307,9 @@ Echidna is **27/27** at `--test-limit 30000`, up from 25/25 — the two redempti
 functions (`desultory_redeem`, `desultory_redeemWithBackstop`) are what the count rose by;
 no new `property_` was added, because the redemption assertion lives in-target (above).
 
-**Medusa is not green.** It reports 25 passed, 1 failed at `--test-limit 50000`, and the
-failure is `property_borrowIndexOutpacesLiquidityIndex` — a pre-existing defect in shipped
-code, not a redemption bug. See the section below.
+Medusa is **26 passed, 0 failed** at `--test-limit 50000`, up from 24 — the two redemption
+target functions are what the count rose by. It was 25 passed / 1 failed until
+[[0008-reserve-cut-rounds-up]] closed the dust-pool inversion described above.
 
 Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 

@@ -33,7 +33,8 @@ Desultory_Lending/
 │   │   ├── 0004-liquidation-engine.md  # ADR: single-entry-point liquidation, clamp-and-count bad debt
 │   │   ├── 0005-treasury-withdrawal.md  # ADR: token reserves are withdrawable, DUSD reserves are not
 │   │   ├── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
-│   │   └── 0007-dusd-redemption.md  # ADR: DUSD redeemable for collateral at par less a flat fee, healthy positions only
+│   │   ├── 0007-dusd-redemption.md  # ADR: DUSD redeemable for collateral at par less a flat fee, healthy positions only
+│   │   └── 0008-reserve-cut-rounds-up.md  # ADR: the reserve cut ceilings, so dust pools cannot invert the indexes
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
 │   │   ├── Invariants.md       # The twelve fuzzing invariants in prose, and what they found
