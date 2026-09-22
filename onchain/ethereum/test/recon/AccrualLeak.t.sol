@@ -115,4 +115,59 @@ contract AccrualLeak is Test, TargetFunctions, FoundryAsserts {
 
         assertGe(p.borrowIndex, p.liquidityIndex, "borrowIndex fell behind liquidityIndex");
     }
+
+    /**
+     * @dev the other half of the same defect, and the reason totalDeposits ceils.
+     *
+     * Ceiling the reserve cut alone does not restore invariant 3. The divisor in
+     *
+     *     liquidityIndex += liquidityIndex * (interest - toReserves) / totalDeposits
+     *
+     * used to FLOOR, and the growth it produces is `distributed * trueDeposits /
+     * totalDeposits`. Flooring the divisor below the true deposit base therefore credits
+     * lenders MORE than was charged — the same leak family test_singleAccrual... pins
+     * above, just entering through the denominator instead of the numerator. At dust
+     * scale the understatement is enormous in relative terms: at totalDeposits == 3
+     * against a true base of 3.999, it is 25%, which no 10% reserve cut can absorb.
+     *
+     * The sequence below is all plain public calls. It reaches deposits == debt == 3
+     * scaled, then lets a year accrue at ~264% (100% utilization, WETH's multiplier):
+     * interest 11 wei, toReserves 2, so 9 wei distributed over a floored base of 3
+     * tripled liquidityIndex while borrowIndex grew 3.64x. Ceiling the divisor makes it
+     * 9/4, which is 3.25x, and the ordering holds.
+     */
+    function test_dustDivisorDoesNotOvercreditLenders() public {
+        address lender = actors[0];
+        address duster = actors[1];
+
+        vm.prank(lender);
+        desultory.deposit(0, address(usdc), 500_000e18); // position 1
+
+        vm.prank(duster);
+        desultory.deposit(0, address(weth), 51); // position 2
+        vm.prank(lender);
+        desultory.borrow(1, address(weth), 3);
+        vm.prank(duster);
+        desultory.withdraw(2, address(weth), 48);
+
+        Desultory.Pool memory start = desultory.getPoolInfo(address(weth));
+        assertEq(start.totalScaledDeposits, 3, "fixture must reach a 3-wei deposit base");
+        assertEq(start.totalScaledBorrows, 3, "fixture must reach a 3-wei borrow base");
+
+        uint256[3] memory schedule = [uint256(60), 3, 365];
+        for (uint256 i = 0; i < schedule.length; i++) {
+            vm.warp(block.timestamp + schedule[i] * 1 days);
+            wethFeed.updateAnswer(WETH_INITIAL_PRICE);
+            usdcFeed.updateAnswer(USDC_INITIAL_PRICE);
+
+            vm.prank(lender);
+            desultory.repay(1, address(weth), 1);
+
+            Desultory.Pool memory p = desultory.getPoolInfo(address(weth));
+            console.log("after days", schedule[i]);
+            console.log("   borrowIndex   ", p.borrowIndex);
+            console.log("   liquidityIndex", p.liquidityIndex);
+            assertGe(p.borrowIndex, p.liquidityIndex, "borrowIndex fell behind liquidityIndex");
+        }
+    }
 }

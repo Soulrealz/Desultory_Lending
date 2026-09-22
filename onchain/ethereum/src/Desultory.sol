@@ -1511,7 +1511,15 @@ contract Desultory is Ownable, ReentrancyGuard {
         uint256 toReserves = (interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS;
         pool.reserves += toReserves;
 
-        uint256 totalDeposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
+        // The divisor rounds UP, and like the cut above that direction is load-bearing.
+        // The growth this produces is `distributed * trueDeposits / totalDeposits`, so a
+        // divisor floored BELOW the true deposit base credits lenders more than was
+        // charged — the same leak family the comment above describes, entering through
+        // the denominator instead of the numerator. At dust scale the understatement is
+        // large in relative terms: a base of 3 against a true 3.999 is 25% off, which no
+        // 10% reserve cut can absorb, and the indexes invert. Ceiling errs toward
+        // distributing slightly less than was charged, which is the safe direction.
+        uint256 totalDeposits = __fromScaledUp(pool.totalScaledDeposits, pool.liquidityIndex);
         if (totalDeposits > 0) {
             pool.liquidityIndex += (pool.liquidityIndex * (interest - toReserves)) / totalDeposits;
         }
