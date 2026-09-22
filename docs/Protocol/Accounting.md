@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2df55c5
+verified-against: edaa61a
 ---
 
 # Accounting
@@ -53,12 +53,15 @@ flowchart TD
     D -->|yes| Y[emit IndexUpdate, return]
     D -->|no| E[rate = getBorrowRate util]
     E --> F["factor = rate * dt * WAD / (YEAR * MAX_BPS)"]
-    F --> G["interest = totalDebt * factor / WAD"]
-    G --> H["toReserves = ceil(interest * 10%)"]
-    H --> I["borrowIndex += borrowIndex * factor / WAD"]
+    F --> G["borrowIndex += borrowIndex * factor / WAD"]
+    G --> H["interest = fromScaledUp(totalScaledBorrows, borrowIndex) - totalDebt"]
+    H --> I["toReserves = ceil(interest * 10%)"]
     I --> J[reserves += toReserves]
-    J --> K["liquidityIndex += liquidityIndex * (interest - toReserves) / totalDeposits"]
-    K --> Y
+    J --> K["totalDeposits = fromScaledUp(totalScaledDeposits, liquidityIndex)"]
+    K --> L{totalDeposits > 0?}
+    L -->|no| Y
+    L -->|yes| M["liquidityIndex += liquidityIndex * (interest - toReserves) / totalDeposits"]
+    M --> Y
 ```
 
 Two things worth noting:
@@ -80,7 +83,17 @@ line withholding something on every accrual. While the cut floored, `interest * 
 reserve factor withheld nothing, lenders took the whole wei, and the indexes inverted on a
 single accrual. The fuzzer found it in shipped code; [[0008-reserve-cut-rounds-up]] records
 the diagnosis and the rejected alternatives. `toReserves <= interest` still holds for every
-`interest >= 1`, so the ceiling cannot reintroduce the leak described below. Reserves accumulate in token units, and two other paths feed the same pot:
+`interest >= 1`, so the ceiling cannot reintroduce the leak described below.
+
+**The deposit divisor rounds UP too, and it is load-bearing for the same reason from the
+other side.** `totalDeposits` is read with `__fromScaledUp`. The growth the last line
+produces is `distributed * trueDeposits / totalDeposits`, so a divisor floored *below* the
+true deposit base credits lenders more than was charged — the same leak family, entering
+through the denominator instead of the numerator, and at dust scale a base of 3 against a
+true 3.999 is 25% off, which no 10% reserve cut can absorb. Both roundings are recorded in
+[[0008-reserve-cut-rounds-up]].
+
+Reserves accumulate in token units, and two other paths feed the same pot:
 `LIQ_PROTOCOL_SHARE` — 30%, or `LIQ_BACKSTOP_SHARE`, 70% — of every liquidation bonus
 (see [[Liquidations]]), and, new with redemption, the redemption fee on the
 **backstopped** path only. The DUSD stability fee is a fourth revenue stream but lands in

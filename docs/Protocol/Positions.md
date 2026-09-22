@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 75a675f
+verified-against: edaa61a
 ---
 
 # Positions
@@ -84,8 +84,10 @@ gate stays permanently disabled because `_protocol` is still the zero address.
 
 ## Known gap
 
-`src/PositionNFT.sol` has no SPDX license identifier. Every other source file
-does.
+Several files have no SPDX license identifier: `src/Desultory.sol`,
+`src/PositionNFT.sol`, `src/governance/VoteToken.sol`, `script/Config.s.sol`,
+`script/Deploy.s.sol` and `test/Desultory.t.sol`. The rest of `src/` (`DUSD.sol`,
+`crosschain/Adapter.sol`, all three libraries) carries `UNLICENSED`.
 
 ## Related
 

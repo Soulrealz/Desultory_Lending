@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2502b9a
+verified-against: edaa61a
 ---
 
 # Liquidations
@@ -48,15 +48,20 @@ charged to the position: the borrower gives up the same seizure either way, so
    much of `collateralAsset`, seizure is capped at `getPositionCollateralForToken`, and
    `repayAmount` is **recomputed downward** from the capped seizure
    (`LiquidationMath.repayFromSeize` + `_debtAmountFromUSD`, the exact inverse of step 4,
-   using the same DUSD-at-par convention), then re-clamped to `debt` in case rounding
-   pushes it back over. Skipping this step and charging the original `repayAmount` for a
-   short delivery would be the same class of bug as defect 1 below (wrong-token payout) —
-   just harder to see, because both sides are still denominated correctly.
+   using the same DUSD-at-par convention), then re-clamped to the same close-factor bound
+   (`maxRepay`, not `debt`) in case rounding pushes it back over. Skipping this step and
+   charging the original `repayAmount` for a short delivery would be the same class of bug
+   as defect 1 below (wrong-token payout) — just harder to see, because both sides are
+   still denominated correctly.
 6. **Bonus split**: `LiquidationMath.splitBonus` divides the seize amount between the
    liquidator and the protocol (`LIQ_PROTOCOL_SHARE`, 30% of the bonus lands in
    `pool.reserves` — or `LIQ_BACKSTOP_SHARE`, 70%, on the backstop path).
 7. **Effects**: `_seizeCollateral` removes the seized collateral and books the protocol
-   cut; `_retireDebt` reduces the position's debt by exactly `repayAmount`.
+   cut; `_retireDebt` retires `repayAmount` of the position's debt, converting it to a
+   scaled figure **down** (and clamping to the scaled debt held) so a repayment never
+   retires more debt than it covers — the pool keeps the remainder, as in `repay()`. On
+   the DUSD branch the arithmetic is `_retireDusdDebt`, shared with `repayDUSD` and the
+   redemption path; only the burn is local.
 8. **Interaction**: `safeTransfer` sends the liquidator's share of seized collateral
    from the contract's own balance — value only ever moves by the liquidator's implicit
    payment (their debt-asset tokens, taken via `_retireDebt`) against protocol-held
@@ -93,9 +98,9 @@ sequenceDiagram
     end
     D->>M: splitBonus(seizeAmount, LIQ_PROTOCOL_SHARE or LIQ_BACKSTOP_SHARE)
     M-->>D: liquidatorShare, protocolCut
-    L->>DUSD: pays repayAmount (burn if DUSD, else transferFrom)
     D->>D: _seizeCollateral (protocolCut -> pool.reserves)
     D->>D: _retireDebt(repayAmount)
+    L->>DUSD: pays repayAmount (burn if DUSD, else transferFrom)
     D->>L: safeTransfer(liquidatorShare)
     opt no collateral left anywhere
         D->>D: _recordBadDebtIfStranded -> totalBadDebtUSD += remaining debt
