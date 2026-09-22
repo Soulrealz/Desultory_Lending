@@ -148,7 +148,20 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - `releaseBackstop(token, amount)` (owner-only) returns committed backstop capital to
   `pool.reserves` — see the liquidation backstop above. It moves no tokens; cash still
   leaves only through `withdrawReserves`.
-- Token add/remove is still ungoverned.
+- `addToken(TokenConfig)` / `setTokenRetired(token, bool)` (owner-only) are the listing
+  admin. Both the constructor and `addToken` go through one private `_listToken`, so the
+  risk-parameter validation and the `MAX_SUPPORTED_TOKENS = 32` cap are shared rather than
+  duplicated — `liquidationThreshold <= 100` is quantified over every listed token by ADR
+  0007's and ADR 0008's safety arguments. `addToken` also rejects a duplicate, the zero
+  address, a zero feed, and DUSD (which is debt-only and would otherwise get a second
+  accounting path through `__pools`).
+  Retirement is **not** removal: `__tokenList` never shrinks and `__tokenInfos` is never
+  cleared, because every health computation iterates that list and dropping an entry would
+  make an open position's collateral *and* debt in that asset vanish from the sum at once.
+  A `notRetired` modifier gates exactly two entry points — `deposit` and `borrow` — so new
+  exposure stops while every unwind path (withdraw, repay, liquidate, redeem, release,
+  withdrawReserves) stays open. Reversible both ways. Backed by `__retiredTokens` as a side
+  mapping, so `getTokenInfo`'s ABI is unchanged. See ADR 0009.
 
 ### `src/PositionNFT.sol` — `Position` ERC721
 - Token id = position id; minted by Desultory (`deposit(0, …)`). The NFT IS
@@ -232,6 +245,11 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   reverts, accrue-before-evaluate ordering, seizure clamped to held collateral with the
   repayment back-solved down to match, and `totalBadDebtUSD` recognition (and
   non-recognition when collateral remains).
+- `TokenAdmin.t.sol` — 16 tests for `addToken`/`setTokenRetired`: the validation surface,
+  the 32-token cap on both the constructor and `addToken`, that a freshly listed pool
+  charges no interest for time before it was listed, and the load-bearing one — a retired
+  asset's position reports a bit-identical health factor and still repays, withdraws and
+  liquidates.
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
 - `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.

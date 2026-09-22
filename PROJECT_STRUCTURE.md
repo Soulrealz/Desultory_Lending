@@ -34,7 +34,8 @@ Desultory_Lending/
 │   │   ├── 0005-treasury-withdrawal.md  # ADR: token reserves are withdrawable, DUSD reserves are not
 │   │   ├── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
 │   │   ├── 0007-dusd-redemption.md  # ADR: DUSD redeemable for collateral at par less a flat fee, healthy positions only
-│   │   └── 0008-reserve-cut-rounds-up.md  # ADR: the reserve cut ceilings, so dust pools cannot invert the indexes
+│   │   ├── 0008-reserve-cut-rounds-up.md  # ADR: the reserve cut ceilings, so dust pools cannot invert the indexes
+│   │   └── 0009-token-listing-admin.md  # ADR: tokens are appended and retired, never removed from the list
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
 │   │   ├── Invariants.md       # The twelve fuzzing invariants in prose, and what they found
@@ -67,6 +68,7 @@ Desultory_Lending/
         │       └── RedemptionMath.sol  # Storage-free redemption fee arithmetic: the collateral/DUSD inverse pair
         └── test/
             ├── Desultory.t.sol      # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, health factor, ownership, DUSD debt, liquidation, redemption
+            ├── TokenAdmin.t.sol     # addToken / setTokenRetired: validation, the 32-token cap, and that a retired asset's positions still unwind
             ├── LiquidationMath.t.sol # Unit + fuzz tests for the liquidation math library
             ├── RedemptionMath.t.sol  # Unit + fuzz tests for the redemption fee pair
             ├── DUSD.t.sol      # DUSD unit tests (minter gating, OFT wiring)

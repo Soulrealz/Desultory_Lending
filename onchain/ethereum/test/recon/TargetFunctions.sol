@@ -437,6 +437,31 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         ghostPaidOut[slot] += amount;
     }
 
+    /**
+     * @dev the owner closing an asset to new exposure, or reopening it. Owner-only, and it
+     * moves no tokens, so the ghosts must NOT be touched here — same shape as
+     * desultory_releaseBackstop.
+     *
+     * Retirement blocks deposit and borrow only; every unwind path stays open, which is
+     * exactly what makes it safe to fuzz alongside the rest of the surface.
+     *
+     * It must never leave BOTH tokens retired at once. This harness has a fixed two-token
+     * set, so that state makes every deposit and borrow revert permanently and the rest of
+     * the run explores nothing — retiring one therefore reopens the other.
+     */
+    function desultory_setTokenRetired(uint8 tokenSeed, bool retired) public updateGhosts {
+        MockERC20 token = _getToken(tokenSeed);
+        MockERC20 other = _getToken(tokenSeed % 2 == 0 ? 1 : 0);
+
+        vm.prank(desultory.owner());
+        desultory.setTokenRetired(address(token), retired);
+
+        if (retired && desultory.isTokenRetired(address(other))) {
+            vm.prank(desultory.owner());
+            desultory.setTokenRetired(address(other), false);
+        }
+    }
+
     function warp(uint32 secs) public updateGhosts {
         uint256 jump = between(uint256(secs), 1, MAX_WARP);
         vm.warp(block.timestamp + jump);

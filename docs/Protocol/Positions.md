@@ -26,6 +26,13 @@ attack in letting a stranger do it for you, and permissionless repay is what mak
 third-party liquidation bots possible. Withdrawing and borrowing extract value, so
 they check ownership.
 
+Orthogonal to the caller check, `deposit` and `borrow` also carry `notRetired(token)` —
+the only two entry points that do. A retired asset takes no new exposure, while `withdraw`,
+`repay` and every liquidation and redemption path stay open so an existing position can
+still unwind. Retirement never removes the asset from `__tokenList`, so a retired token's
+collateral and debt keep counting in every figure below exactly as before. See
+[[0009-token-listing-admin]].
+
 `deposit(0, token, amount)` mints a fresh position to `msg.sender` and deposits
 into it. A single address can hold any number of positions, and they are
 independent — one going bad does not touch the others. Tested by
