@@ -3,7 +3,7 @@ status: accepted
 date: 2026-09-22
 ---
 
-# 0008 — The reserve cut rounds up
+# 0008 — The accrual roundings both turn toward the pool
 
 ## Status
 
@@ -51,32 +51,65 @@ One wei of interest, none of it withheld, moved `liquidityIndex` by `1/51` while
 moved `borrowIndex` by a third as much. The indexes inverted immediately.
 
 **What it was not.** The inversion is transient: `borrowIndex` compounds back past
-`liquidityIndex` within ~16 further accruals and stays ahead, and a 51-wei deposit grows to
-70 over 40 rounds, tracking the index rather than outrunning it. There is no unbounded
+`liquidityIndex` within a handful of further accruals and stays ahead, and a 51-wei deposit
+grows to 70 over 40 rounds, tracking the index rather than outrunning it. There is no unbounded
 pump, so this is not a share-inflation attack, and `property_custodyReconciles` held
 throughout at the failing state (`6 + 46 >= 52 + 0`). It is an ordering violation in
 dust-scale pools, which is exactly what the invariant exists to catch.
 
 ## Decision
 
-**The reserve cut rounds up.**
+**Both roundings in the distribution step turn toward the pool.**
 
 ```solidity
-uint256 toReserves = (interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS;
+uint256 toReserves   = (interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS;      // was floor
+uint256 totalDeposits = __fromScaledUp(pool.totalScaledDeposits, liquidityIndex); // was floor
 ```
 
-Three reasons this is the right line to change rather than the invariant:
+The first was found by root-causing the reported failure. **The second was found in review,
+after the first was already committed and Medusa was already green** — the reviewer
+constructed a state the fix did not cover, and it reproduced exactly.
 
-1. **It restores the invariant's stated premise.** The property is justified by the reserve
-   factor removing something on every accrual. Ceiling makes that true for every
-   `interest >= 1` instead of only for `interest >= 10`.
+### Why the cut alone was not enough
+
+Ceiling the cut only helps while `interest < 10`. The other rounding in the same three
+lines is structural. Growth is
+
+```
+deposits grow by  distributed * trueDeposits / totalDeposits
+```
+
+so a `totalDeposits` **floored below** the true base credits lenders more than was charged —
+the same leak family as above, entering through the denominator rather than the numerator.
+At dust scale the understatement is large in relative terms: a base of 3 against a true
+3.999 is 25% off, which no 10% cut can absorb.
+
+The reproduction, now `test_dustDivisorDoesNotOvercreditLenders`, reaches
+`deposits == debt == 3` scaled through plain public calls and lets a year accrue at ~264%:
+`interest` 11 wei, `toReserves` 2, so 9 wei distributed over a floored base of 3 **tripled**
+`liquidityIndex` while `borrowIndex` grew 3.64x. Ceiling the divisor makes it 9/4 = 3.25x
+and the ordering holds. Note the deficit here is **zero** — deposits equalled debt — so this
+was never reachable only in the `0.9B > D` region the older notes describe.
+
+### Why these are the right lines to change rather than the invariant
+
+1. **They restore the invariant's stated premise.** The property is justified by the
+   reserve factor removing something on every accrual. Ceiling the cut makes that true for
+   every `interest >= 1` instead of only for `interest >= 10`, and ceiling the divisor stops
+   the denominator giving it back.
 2. **It is the direction the protocol's own rounding rule already demands.** Every other
-   conversion in `accrue()` rounds toward the pool. `toReserves` flooring was the sole
-   exception, and it rounded toward lenders and away from the protocol.
-3. **It cannot reintroduce the leak of [[Accounting]]'s accrual bug.** `toReserves <=
-   interest` still holds for every `interest >= 1`, so `interest - toReserves` cannot
-   underflow and the pool still distributes no more than it charged. The existing
-   `test_singleAccrualDistributesMoreThanItCharges` continues to report a total leak of 0.
+   conversion in `accrue()` rounds toward the pool. These two were the only exceptions, and
+   both rounded toward lenders and away from the protocol.
+3. **Neither can reintroduce the leak of [[Accounting]]'s accrual bug.** `toReserves <=
+   interest` holds for every `interest >= 1`, so `interest - toReserves` cannot underflow
+   and the pool still distributes no more than it charged; ceiling the divisor can only
+   distribute *less*. `test_singleAccrualDistributesMoreThanItCharges` continues to report a
+   total leak of 0.
+
+The underflow bound, stated explicitly because this is interest accrual in a lending
+protocol: `(i*1000 + 9999)/10000 = ceil(i/10)`, and `ceil(i/10) <= i` for all `i >= 1`
+since `i + 9 <= 10i`. Equality holds only at `i in {0, 1}`, where `liquidityIndex` simply
+does not move. `accrue()` cannot revert on that subtraction.
 
 The cost is at most one wei of extra reserve per accrual, taken from the lender side, in a
 direction that favours the protocol's solvency.
@@ -93,11 +126,11 @@ invariant to match the code is the direction this project has consistently refus
 and it would leave the underlying rounding asymmetry in place for every pool, not just the
 dust ones.
 
-**Floor `totalDeposits` in the `liquidityIndex` divisor.** Rejected: it needs an arbitrary
-magic minimum, which is the same unexplained-constant smell as the `-1` that
-[[0004-liquidation-engine]] refused for the seizure rounding seam. It also treats the
-symptom — the large relative jump — rather than the cause, which is that nothing was
-withheld.
+**Impose an arbitrary minimum on `totalDeposits`.** Rejected: an unexplained magic constant,
+the same smell as the `-1` [[0004-liquidation-engine]] refused for the seizure seam.
+Rounding the divisor up needs no constant and is the same discipline applied consistently.
+(An earlier draft of this ADR dismissed touching the divisor at all as symptom-treatment.
+That was wrong — the floored divisor was the other half of the cause, and review caught it.)
 
 **Clamp `liquidityIndex` growth so it can never exceed `borrowIndex` growth.** Rejected as
 the worst of the three: it makes the invariant true by construction while leaving the
@@ -111,16 +144,18 @@ is real debt the borrower owes; the defect was that none of it was withheld.
 
 ## Consequences
 
-- `property_borrowIndexOutpacesLiquidityIndex` passes. Medusa goes from 25 passed / 1
-  failed to **26 passed / 0 failed** at `--test-limit 50000`; Echidna stays at 27/27.
+- Both known reproductions are closed and Medusa goes from 25 passed / 1 failed to
+  **26 passed / 0 failed** at `--test-limit 50000`; Echidna stays at 27/27. That is not a
+  proof. The first fix also produced a green Medusa run while a second reachable inversion
+  still existed, which is exactly how the divisor defect was found — by construction in
+  review, not by the fuzzer. Treat a green run as "not found at this limit".
 - Lenders forgo up to one wei per accrual relative to the old behaviour, and reserves gain
   it. At any material scale the ceiling is indistinguishable from the floor.
-- In a dust pool where `interest` is a single wei, `liquidityIndex` now does not move at
-  all until interest reaches 10 wei. Lenders in such a pool earn nothing until it is worth
-  earning, which is the honest outcome — previously they earned a wei the rate had not
-  produced.
-- The harness is now **three for three** on real defects in reviewed code, and for the
-  first time all three are closed.
+- In a dust pool where `interest` is a single wei, `liquidityIndex` does not move at all:
+  `distributed = interest - ceil(interest/10)` is zero only at `interest <= 1`, so lenders
+  begin earning at 2 wei. Previously they earned a wei the rate had not produced.
+- The harness is **three for three** on real defects in reviewed code. All three are
+  closed, with the caveat above about what a green fuzz run does and does not establish.
 - `Desultory` runtime grows 23 bytes, to 18 277 of 24 576.
 
 ## Related

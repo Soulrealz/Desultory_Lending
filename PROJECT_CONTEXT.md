@@ -23,8 +23,10 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   (`__scaledDeposits`/`__scaledBorrows`); real value = scaled × index / 1e18.
   `accrue(token)` runs at the top of every state-changing call: borrowers pay
   `getBorrowRate(utilization)`, 10% of interest goes to `pool.reserves`
-  (RESERVE_FACTOR), 90% grows the liquidity index. Rounding always favors the
-  pool (deposits round down, debts round up). `accrue` charges borrowers **first**
+  (RESERVE_FACTOR), the rest grows the liquidity index. Both roundings in that
+  split turn toward the pool — the cut ceilings and the deposit-base divisor
+  ceilings — and that is load-bearing, not cosmetic (ADR 0008). Rounding always
+  favors the pool (deposits round down, debts round up). `accrue` charges borrowers **first**
   and then distributes exactly what was charged — deriving the interest from a
   pre-computed notional instead let the pool pay out more than it took in (found by
   the fuzzer; see `docs/Protocol/Accounting.md`).
@@ -263,8 +265,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   comparison charges realized interest to the redemption. Two coverage limitations are
   recorded in `docs/Audit/Invariants.md` and must not be read past —
   `desultory_redeemWithBackstop` fired **zero** times in 300,000 Medusa calls.
-  **`property_borrowIndexOutpacesLiquidityIndex` is currently failing under Medusa**, a
-  pre-existing defect confirmed on `master`; see `next_steps.md`. `AccrualLeak.t.sol` is the
+  `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
+  **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding
   `liquidate` to the target surface found `property_borrowIndexOutpacesLiquidityIndex`
   (pre-existing, not one of the three new properties) failing: `_seizeCollateral` moved a

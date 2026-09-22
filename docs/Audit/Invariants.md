@@ -263,18 +263,23 @@ accruals and stays there, a 51-wei deposit grows to 70 over 40 rounds rather tha
 outrunning the index, and invariant 4 held throughout (`6 + 46 >= 52 + 0`). So it was an
 ordering violation in dust-scale pools, not a share-inflation attack.
 
-**Fixed**: the reserve cut now rounds **up** —
-`(interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS` — so it withholds something on every
-accrual with any interest at all, which is what invariant 3's premise requires.
-`toReserves <= interest` still holds for every `interest >= 1`, so the accrual leak above
-cannot return; `test_singleAccrualDistributesMoreThanItCharges` still reports a total leak
-of 0. Regression test:
-`test_dustPoolDoesNotLetLiquidityIndexOvertakeBorrowIndex`, in the same file as the leak
-test. Reasoning and rejected alternatives: [[0008-reserve-cut-rounds-up]].
+**Fixed**, in two steps. The reserve cut now rounds **up**
+(`(interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS`), so it withholds something on every
+accrual with any interest at all. That alone was **not** enough: review then constructed a
+second inversion the fix did not cover, reaching `deposits == debt == 3` scaled — a **zero**
+deficit — where the `totalDeposits` divisor floored 25% below its true base and tripled
+`liquidityIndex` in one accrual. So the divisor rounds up too. Both roundings in the
+distribution step now turn toward the pool.
+`toReserves <= interest` still holds for every `interest >= 1`, so the accrual leak above cannot return; `test_singleAccrualDistributesMoreThanItCharges` still
+reports a total leak of 0. Regression tests: `test_dustPoolDoesNotLetLiquidityIndexOvertakeBorrowIndex` and
+`test_dustDivisorDoesNotOvercreditLenders`, both in the same file as the leak test. Reasoning and rejected alternatives: [[0008-reserve-cut-rounds-up]].
 
-The lesson worth keeping: this invariant's justification was load-bearing *code*, not
-commentary. The reserve factor was doing the work the proof claimed, right up until integer
-division stopped it, and nothing else in the system noticed.
+Two lessons worth keeping. First, this invariant's justification was load-bearing *code*,
+not commentary. The reserve factor was doing the work the proof claimed, right up until integer
+division stopped it, and nothing else in the system noticed. Second, **a green fuzz run is
+not a proof**: Medusa reported 26 passed / 0 failed after the first fix, while a second
+reachable inversion was still there. It was found by a reviewer constructing the state by
+hand, not by the fuzzer.
 
 A wei-scale rounding seam was found and deliberately left in place rather than
 patched: the availability bound is computed in token units, but `_seizeCollateral`

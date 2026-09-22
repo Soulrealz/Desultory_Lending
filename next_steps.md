@@ -26,8 +26,14 @@ pool one wei of ceiling-manufactured interest then moved `liquidityIndex` by `1/
 the genuine rate moved `borrowIndex` by a third of that. The indexes inverted on a single
 accrual.
 
-The fix is one line — the cut now ceilings — plus a regression test beside the original
-accrual-leak test. Medusa went from 25 passed / 1 failed to **26 passed / 0 failed**.
+The fix is two lines, both in the same three-line distribution step: the reserve cut now
+ceilings, and so does the `totalDeposits` divisor. The second was found **in review, after
+the first was committed and Medusa was already green** — a reviewer constructed a state at
+`deposits == debt == 3` scaled where the floored divisor sat 25% below its true base and
+tripled `liquidityIndex` in one accrual. Both have regression tests beside the original
+accrual-leak test. Medusa went from 25 passed / 1 failed to **26 passed / 0 failed** — which
+is worth reading as "not found at this limit" rather than "proved", given how the second
+defect surfaced.
 
 That makes the Chimera harness **three for three** on real defects in reviewed, merged
 code, and for the first time all three are closed. Evidence for the original finding:
@@ -50,13 +56,13 @@ were planned and all four are merged; their follow-on slices are tracked here to
 | C2.1 | DUSD redemption (the peg floor) | done — this branch |
 | C2.2 | DUSD supply caps | not started |
 | C2.3 | The `dusdReserves` outlet | not started — unblocked in principle by C2.1 |
-| — | Dust-pool index inversion in `accrue()` | fixed — ADR 0008 |
+| — | Dust-scale accrual rounding in `accrue()` | fixed — ADR 0008 (two roundings) |
 
 The June 2026 assessment's "suggested order of attack" (`docs/Audit/2026-06-10-project-assessment.md`)
 is fully worked through. What remains are the D follow-ons, the rest of the DUSD peg,
 governance and the admin gap described below.
 
-Baseline: **122 tests passing** across 9 suites. `Desultory` runtime 18,277 bytes
+Baseline: **123 tests passing** across 9 suites. `Desultory` runtime 18,277 bytes
 (limit 24,576). Medusa **26 passed, 0 failed** at `--test-limit 50000`; Echidna **27/27**
 at `--test-limit 30000`. Nothing is red.
 
@@ -142,8 +148,9 @@ recorded in ADR 0006, which corrects its scope:
    `liquidateWithBackstop` sets the seizure cap to exactly the availability it just
    unlocked, so it meets it on **every** call, and the commit's own down-rounding adds a
    second floor in the same direction. Observed: a deterministic 2-wei shortfall against
-   a ~449,740-token pool. Still harmless — `property_borrowIndexOutpacesLiquidityIndex`
-   needs a ~10% deficit, `getUtilization` clamps at `MAX_BPS`, and
+   a ~449,740-token pool. Still harmless, though the "needs a ~10% deficit" framing that
+   used to justify that is now known to be wrong — ADR 0008's second reproduction inverts
+   the indexes at a **zero** deficit. `getUtilization` clamps at `MAX_BPS`, and
    `property_custodyReconciles` is a `gte` the shortfall moves in the safe direction —
    and still not worth the unexplained `-1` that would fix it. See ADR 0006's
    Consequences and `testBackstopLeavesDepositsCoveringDebtWithinRoundingDust`.

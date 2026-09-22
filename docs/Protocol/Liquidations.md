@@ -111,7 +111,7 @@ exactly `min(reserves, cash)`, and that quantity is the backstop's entire budget
 
 A pool whose deposits sit below its debt reports zero available while still holding real
 cash, and that is the **normal** post-accrual state — `borrowIndex` grows faster than
-`liquidityIndex` by exactly the reserve cut on every accrual (see [[Accounting]]). The
+`liquidityIndex` by at least the reserve cut on every accrual (see [[Accounting]]). The
 pool does not have to be drained for this to bite.
 
 **This mechanism is no longer liquidation's alone.** `_commitBackstop` has a second
