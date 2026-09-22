@@ -23,7 +23,8 @@ Desultory_Lending/
 │   │   ├── Positions.md        # NFT-as-position semantics, authorization, transfer health gate
 │   │   ├── Oracles.md          # Chainlink wrapper, staleness window, decimal normalization
 │   │   ├── Liquidations.md     # The liquidation engine: health factor, close factor, bonus, clamp-and-count, internal backstop
-│   │   └── Cross-Chain.md      # DUSD-only remote borrowing over LayerZero V2; DUSD debt accounting
+│   │   ├── Cross-Chain.md      # DUSD-only remote borrowing over LayerZero V2; DUSD debt accounting
+│   │   └── DUSD.md             # DUSD lifecycle: mint, repay, redemption, stability fee, the par convention, dusdReserves
 │   ├── Decisions/              # MAINTAINED: numbered ADRs, superseded rather than edited
 │   │   ├── Decisions.md        # Zone index and status conventions
 │   │   ├── 0001-nft-as-position.md  # ADR: the Position NFT is the source of truth
@@ -31,7 +32,8 @@ Desultory_Lending/
 │   │   ├── 0003-dusd-only-cross-chain-borrowing.md  # ADR: only DUSD crosses chains; one home chain per position
 │   │   ├── 0004-liquidation-engine.md  # ADR: single-entry-point liquidation, clamp-and-count bad debt
 │   │   ├── 0005-treasury-withdrawal.md  # ADR: token reserves are withdrawable, DUSD reserves are not
-│   │   └── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
+│   │   ├── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
+│   │   └── 0007-dusd-redemption.md  # ADR: DUSD redeemable for collateral at par less a flat fee, healthy positions only
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
 │   │   ├── Invariants.md       # The twelve fuzzing invariants in prose, and what they found
@@ -60,10 +62,12 @@ Desultory_Lending/
         │   │   └── VoteToken.sol # Bare LayerZero OFT; governance not implemented
         │   └── libraries/
         │       ├── OracleLib.sol       # Chainlink price feed wrapper with staleness check
-        │       └── LiquidationMath.sol # Storage-free liquidation arithmetic: health factor, close factor, seize/repay conversion, bonus split
+        │       ├── LiquidationMath.sol # Storage-free liquidation arithmetic: health factor, close factor, seize/repay conversion, bonus split
+        │       └── RedemptionMath.sol  # Storage-free redemption fee arithmetic: the collateral/DUSD inverse pair
         └── test/
-            ├── Desultory.t.sol      # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, health factor, ownership, DUSD debt
+            ├── Desultory.t.sol      # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, health factor, ownership, DUSD debt, liquidation, redemption
             ├── LiquidationMath.t.sol # Unit + fuzz tests for the liquidation math library
+            ├── RedemptionMath.t.sol  # Unit + fuzz tests for the redemption fee pair
             ├── DUSD.t.sol      # DUSD unit tests (minter gating, OFT wiring)
             ├── Position.t.sol  # Position NFT unit tests (mint auth, health-gated transfers)
             ├── crosschain/     # Two-chain tests on LayerZero's TestHelperOz5
@@ -72,8 +76,8 @@ Desultory_Lending/
             ├── recon/          # Chimera stateful fuzzing harness (Medusa + Echidna)
             │   ├── Setup.sol           # Deploys the system as Deploy.s.sol does, plus 3 actors
             │   ├── BeforeAfter.sol     # Per-token state snapshots around every call
-            │   ├── Properties.sol      # The eleven internal-consistency invariants
-            │   ├── TargetFunctions.sol # Clamped call surface incl. liquidate; liquidator actor never opens a position
+            │   ├── Properties.sol      # The twelve internal-consistency invariants
+            │   ├── TargetFunctions.sol # Clamped call surface incl. liquidate and redeem; liquidator actor never opens a position
             │   ├── CryticTester.sol    # Fuzzer entrypoint
             │   ├── CryticToFoundry.sol # Replays counterexamples as Foundry tests
             │   └── AccrualLeak.t.sol   # Regression test for the accrual leak the fuzzer found

@@ -1,47 +1,77 @@
 # Next Steps
 
 Cold-start handoff. Read this first, then `PROJECT_CONTEXT.md` for the module map and
-`docs/` for the vault. Written 2026-09-19, last updated against commit `7f90054` on `d2-internal-backstop`.
+`docs/` for the vault. Written 2026-09-19, last updated against commit `2502b9a` on branch `c2-dusd-redemption`.
 
 ## START HERE
 
-**Brainstorm D2's external liquidation backstop** — flash-loaning the shortfall from an
-outside venue (Uniswap, Aave) to cover a liquidation. That is the next piece of work, and
-it has not been started — no spec, no plan, no code.
+**`property_borrowIndexOutpacesLiquidityIndex` is failing, on `master`, in shipped code.**
 
-The **internal** half is done and merged (ADR 0006). The protocol can now fund a seizure
-from its own reserves when the pool reports no available liquidity but is in fact holding
-cash. What it still cannot do is fund one when the pool holds nothing — that needs
-outside capital, and that is this piece.
+This is a reproduced assertion failure in already-merged core accrual, not a possible edge
+case and not something the redemption branch introduced. It is the most important open
+item in the repository and it is why the D2 work below is no longer the first thing to do.
 
-Invoke `superpowers:brainstorming` with it. Classify it **architectural**, not bounded: it
-adds the protocol's first real external integration, with an untrusted venue in the middle
-of a liquidation, so it gets the full path — questions, approaches, a sectioned design, a
-written spec, then `superpowers:writing-plans`.
+**Verified both ways, first-hand:**
 
-Read `## Do this next` below before asking the first question. Skim
-`docs/Protocol/Liquidations.md` (the "Internal backstop" section and Known limitations) and
-`docs/Decisions/0006-internal-liquidation-backstop.md` first — the external half sits on
-top of the internal one, and arriving without that context wastes the first few questions.
+| Where | Command | Result |
+|---|---|---|
+| `master` @ `542f710`, none of the redemption code | `medusa fuzz --test-limit 120000` | 23 passed, **1 failed** |
+| branch `c2-dusd-redemption` | `medusa fuzz --test-limit 50000` | 25 passed, **1 failed** |
 
-Spec and plan paths follow the user's global convention:
+Same property both times. The branch only supplied a corpus rich enough to reach it
+faster. Two independent minimal reproductions contain **zero redemption calls** — only
+`desultory_deposit`, `oracle_setPrice`, `desultory_borrow`, `desultory_repay`.
+
+**Mechanism**, derived from `accrue()`:
 
 ```
-docs/superpowers/specs/liquidations/<Month_YYYY>/YYYY-MM-DD-external-backstop-design.md
-docs/superpowers/plans/liquidations/<Month_YYYY>/YYYY-MM-DD-external-backstop.md
+liquidityIndex growth = (interest - toReserves) / totalDeposits  = 0.9*i / D
+borrowIndex   growth  = factor                                   ~ i / B
 ```
 
-Note `docs/superpowers/` is gitignored, so those two files live on disk but are never
-committed. Everything else in `docs/` is tracked and must be.
+`liquidityIndex` outpaces `borrowIndex` exactly when `0.9*B > D` — the same condition ADR
+0004 names as the reason the seizure availability bound exists.
 
-Do not start implementing before the user approves the design. Do not touch `accrue()`, do
-not weaken a fuzzing invariant, and do not write down `liquidityIndex` — see
-`## How to work in this repo`.
+**The economic path cannot reach that state.** From `D0 = B0`, deposits track
+`Dn = 0.9*Bn + 0.1*P`, which stays above `0.9*Bn` forever, and `borrow`/`withdraw` both
+gate on `D >= B`. **What reaches it is dust.**
+`totalDeposits = __fromScaledDown(51, liquidityIndex)` floors to a single-digit integer,
+and `liquidityIndex * (interest - toReserves) / totalDeposits` against a denominator that
+small blows the index up in one step. The reported failing pool state —
+`totalScaledDeposits: 51`, `reserves: 0` — matches exactly.
+
+**Evidence, logs and both call sequences:**
+`.superpowers/sdd/2026-09-19-dusd-redemption/evidence/` (`medusa_run4_*`, `medusa_run5_*`,
+and the `*_no_redeem*.json` sequences).
+
+**What to do.** Reproduce it first — replay a sequence through
+`test/recon/CryticToFoundry.sol` and get it failing as a Foundry test before touching
+anything. Then decide whether the answer is a minimum-deposit floor, a guard on a
+degenerate `totalDeposits` denominator in `accrue()`, or something else; that is a design
+question and `accrue()` is the most load-bearing function in the protocol, so it gets
+`superpowers:brainstorming` before it gets a patch. Do not fold it into an unrelated
+branch — this is the third real defect the harness has caught and it deserves its own
+record.
+
+After that, the next piece of *feature* work is **D2's external liquidation backstop** —
+flash-loaning the shortfall from an outside venue to cover a liquidation. It has not been
+started (no spec, no plan, no code) and it was the START HERE item until the failure above
+displaced it. Its brief is under "Second: D2's external backstop" below; classify it
+**architectural**, brainstorm before coding, and read `docs/Protocol/Liquidations.md`'s
+Internal backstop section and ADR 0006 first.
+
+Spec and plan paths follow the user's global convention, under the gitignored
+`docs/superpowers/specs/` and `docs/superpowers/plans/`.
+
+Do not touch `accrue()` casually, do not weaken a fuzzing invariant, and do not write down
+`liquidityIndex` — see the conventions section near the end of this file. (The START HERE
+item *is* a change to `accrue()`'s neighbourhood. That is exactly why it gets a design
+session rather than a patch.)
 
 ## Where the project is
 
-**Desultory Lending** is an over-collateralized lending protocol. Four decomposed
-projects were planned; all four are now merged:
+**Desultory Lending** is an over-collateralized lending protocol. Four decomposed projects
+were planned and all four are merged; their follow-on slices are tracked here too:
 
 | Project | What it was | State |
 |---|---|---|
@@ -51,16 +81,22 @@ projects were planned; all four are now merged:
 | D1 | Liquidation engine rewrite | done — merged 2026-09-13 |
 | D2.1 | Treasury slice: owner-gated reserve withdrawal | done — merged 2026-09-19 |
 | D2.2 | Internal liquidation backstop (reserves fund the seizure) | done — merged 2026-09-19 |
-| D2.3 | External liquidation backstop (flash loan) | **next — not started** |
+| D2.3 | External liquidation backstop (flash loan) | not started |
+| C2.1 | DUSD redemption (the peg floor) | done — this branch |
+| C2.2 | DUSD supply caps | not started |
+| C2.3 | The `dusdReserves` outlet | not started — unblocked in principle by C2.1 |
 
 The June 2026 assessment's "suggested order of attack" (`docs/Audit/2026-06-10-project-assessment.md`)
-is fully worked through. What remains are the D follow-ons, the DUSD peg, governance,
-and the admin gap described below.
+is fully worked through. What remains are the D follow-ons, the rest of the DUSD peg,
+governance, the admin gap described below — and, ahead of all of them, the accrual failure
+in START HERE.
 
-Baseline: **103 tests passing** across 8 suites. `Desultory` runtime 17,080 bytes
-(limit 24,576). Medusa 24/24 and Echidna 25/25 green.
+Baseline: **120 tests passing** across 9 suites. `Desultory` runtime 18,222 bytes
+(limit 24,576). Echidna **27/27** at `--test-limit 30000`. Medusa is **25 passed, 1
+failed** at `--test-limit 50000` — the failure is the START HERE item above and is
+pre-existing on `master`, not a regression.
 
-## Do this next: D2's external backstop
+## Second: D2's external backstop
 
 ### Why this and not something else
 
@@ -73,8 +109,10 @@ holds nothing, and no amount of internal bookkeeping fixes it. That case needs o
 capital.
 
 It is also the last piece of D2, and it is the largest one: the protocol's first real
-external integration. Every other open item (below) is either blocked on a design that
-does not exist yet or is cosmetic next to a liquidation that cannot execute.
+external integration. Every other *feature* item (below) is either blocked on a design
+that does not exist yet or is cosmetic next to a liquidation that cannot execute — but the
+accrual failure in START HERE outranks all of it, because it is a live defect rather than
+a missing capability.
 
 ### What the external backstop has to settle
 
@@ -103,10 +141,23 @@ Brainstorm before coding — this is architectural, not bounded.
 
 ## Alternatives, if the above is wrong for you
 
-- **C2 — DUSD peg, redemption, supply caps.** `userBorrowedAmountUSD` values DUSD debt at
-  $1 on an assumption with no mechanism behind it, and D1's liquidation trigger now
-  inherits it: an unpegged DUSD means positions are seized at the wrong threshold.
-  Real, but blocks nothing.
+- **C2 — DUSD peg: supply caps (C2.2) and the reserves outlet (C2.3).** The previous
+  edition of this file called C2 "real, but blocks nothing". **That was wrong**, and the
+  correction is worth stating rather than quietly deleting: C2 blocks `dusdReserves`
+  withdrawal outright (ADR 0005 deferred that outlet to this project by name) and it
+  underpins the liquidation trigger for **every DUSD borrower**, since `healthFactor`
+  divides by a `userBorrowedAmountUSD` that values DUSD at par. A drift mis-prices the
+  seizure line in both directions: below $1 positions are seized early, above $1
+  under-collateralized positions read as healthy and the protocol accrues bad debt it never
+  recognizes.
+
+  **C2.1 is now done** — redemption (ADR 0007) puts a floor under DUSD so arbitrage
+  enforces par rather than the contract assuming it. What remains:
+  **C2.2 supply caps**, since nothing bounds how much DUSD can be minted and redemption is
+  one-sided (a floor, not a ceiling); and **C2.3, the `dusdReserves` outlet**, now
+  unblocked *in principle* because a DUSD-to-collateral route exists, though paying it out
+  still means minting against no new collateral — which now dilutes redemption backing
+  rather than nothing at all, a sharper objection than 0005's rather than a weaker one.
 - **D3 — ElizaOS automation.** README Path B and the 0–4.9% / 5% band split. Mostly an
   off-chain agent plus a permissioned entry point; the band structure is the documented
   extension point.
@@ -140,6 +191,25 @@ recorded in ADR 0006, which corrects its scope:
    changes accounting semantics with no test designed for it.
 3. **A history bullet** in Liquidations.md's Known limitations reads better in ADR 0004,
    which already records it.
+
+## Parked from C2.1 — recorded, not fixed
+
+1. **The backstopped redemption path is effectively unfuzzed.**
+   `desultory_redeemWithBackstop`'s real call fired **zero** times across 300,000 Medusa
+   calls — four preconditions must align and the last two pull against each other. It rests
+   on four unit tests. `desultory_redeem` fired 14 times at 50k. Do not read the headline
+   fuzzer counts as coverage of redemption. The preconditions are not relaxable: the
+   `healthFactor >= WAD` gate *is* the feature.
+2. **The in-target redemption assertion has a known blind spot.**
+   `dusdBurned >= getValueUSD(collateralAsset, received)` catches the redeemer being
+   over-paid, not debt being under-cleared relative to the collateral removed. The latter is
+   covered only by `testRedeemImprovesTheTargetHealthFactor` as a unit test. The obvious
+   property — "redemption never lowers the target's health factor" — is **unassertable in
+   this harness**, because `redeem` accrues internally so a before/after comparison charges
+   realized interest to the redemption. Do not re-add it; see `docs/Audit/Invariants.md`.
+3. **`lcov` line coverage on the recon harness is unreliable.** It reported non-zero hits on
+   lines after a zero-hit call site. Use counter instrumentation instead.
+
 
 ## How to work in this repo
 
@@ -193,11 +263,13 @@ Examples from the log: `rewrite the liquidation engine`, `update docs`,
 ## Map of the vault
 
 - `docs/Protocol/` — what the protocol actually does, per module. Maintained.
-  `Accounting`, `Interest-Rate-Model`, `Positions`, `Oracles`, `Liquidations`, `Cross-Chain`.
+  `Accounting`, `Interest-Rate-Model`, `Positions`, `Oracles`, `Liquidations`, `Cross-Chain`,
+  `DUSD` (the stablecoin's whole lifecycle, including redemption).
 - `docs/Decisions/` — numbered ADRs. `0001` NFT-as-position, `0002` internal-consistency
   invariants (superseded in part by `0004`), `0003` DUSD-only cross-chain borrowing,
   `0004` liquidation engine, `0005` treasury withdrawal, `0006` internal liquidation
-  backstop.
-- `docs/Audit/` — `Invariants.md` (the twelve fuzzing properties in prose) and the June
-  project assessment.
+  backstop, `0007` DUSD redemption.
+- `docs/Audit/` — `Invariants.md` (the twelve fuzzing properties in prose, the in-target
+  redemption assertion, the redemption coverage limitations, and the failing property
+  above) and the June project assessment.
 - `docs/Notes/` — scratch. Makes no accuracy claim.

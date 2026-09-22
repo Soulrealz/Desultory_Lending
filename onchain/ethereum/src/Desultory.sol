@@ -11,6 +11,7 @@ import "./PositionNFT.sol";
 import "./DUSD.sol";
 import {OracleLib, AggregatorV3Interface} from "./libraries/OracleLib.sol";
 import {LiquidationMath} from "./libraries/LiquidationMath.sol";
+import {RedemptionMath} from "./libraries/RedemptionMath.sol";
 
 /**
  * @dev the slice of the cross-chain Adapter the accounting core needs.
@@ -48,6 +49,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     error Desultory__DestinationNotAllowed(uint32 eid);
     error Desultory__NotLiquidatable(uint256 positionId, uint256 healthFactor);
     error Desultory__NoDebtInAsset(uint256 positionId, address asset);
+    error Desultory__NotRedeemable(uint256 positionId, uint256 healthFactor);
 
     ////////////////////////
     // Events
@@ -77,6 +79,14 @@ contract Desultory is Ownable, ReentrancyGuard {
         uint256 protocolCut
     );
     event BadDebtRecorded(uint256 indexed positionId, uint256 amountUSD);
+    event Redemption(
+        address indexed redeemer,
+        uint256 indexed positionId,
+        address indexed collateralAsset,
+        uint256 dusdBurned,
+        uint256 collateralToRedeemer,
+        uint256 feeToReserves
+    );
 
     ///////////////////////
     // Types & interfaces
@@ -191,6 +201,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     uint16 private constant LIQ_PROTOCOL_SHARE = 3_000; // 30% of the bonus
     uint16 private constant LIQ_BACKSTOP_SHARE = 7_000; // 70% when the protocol funds the seizure
     uint16 private constant RESERVE_FACTOR = 1_000; // 10% of borrow interest to the protocol
+    uint16 private constant REDEMPTION_FEE_BPS = 50; // 0.5% — the redemption activation threshold
     uint256 private constant WAD = 1e18;
     uint256 private constant SECONDS_PER_YEAR = 365 days;
 
@@ -802,9 +813,18 @@ contract Desultory is Ownable, ReentrancyGuard {
         // pool.reserves falls by exactly `committed`. property_custodyReconciles is
         // balance + borrows >= deposits + reserves, so its right-hand side can gain up to
         // 1 wei per commit with nothing on the left to match. This is the one rounding
-        // direction on this path that runs against the pool; it is bounded at <= 1 wei per
-        // commit and every commit costs a real liquidation, so it is a documented seam
-        // rather than a solvency concern. See docs/Protocol/Liquidations.md.
+        // direction on this path that runs against the pool, and it is bounded at <= 1 wei
+        // per commit.
+        //
+        // Commits are NOT self-limiting. That argument held while liquidateWithBackstop —
+        // which requires an unhealthy position — was the only caller. _redeem is now a
+        // second caller and it is gated on healthFactor >= WAD, so a commit is cheap and
+        // permissionless: any redeemer can fire one against any healthy position. What
+        // stops a zero-value call from triggering one is _redeem's `removed == 0` guard,
+        // which runs before this function is reached. A larger dusdAmount still triggers a
+        // full-deficit commit sized on the pool's own shortfall rather than on `want`;
+        // that shape is deliberate and out of scope here. The seam remains a documented
+        // rounding seam rather than a solvency concern. See docs/Protocol/Liquidations.md.
         //
         // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so
         // deposits fall by at least `amount` while reserves rise by exactly `amount`, and
@@ -921,15 +941,184 @@ contract Desultory is Ownable, ReentrancyGuard {
             amount = debt;
         }
 
+        _retireDusdDebt(positionId, amount);
+
+        __DUSD.burn(msg.sender, amount);
+        emit DusdRepay(positionId, msg.sender, amount);
+    }
+
+    /**
+     * @dev retire `amount` of a position's DUSD debt.
+     *
+     * Shared by repayDUSD and the redemption path so both reduce debt through identical
+     * arithmetic. It is not the only copy: _retireDebt's DUSD branch carries a third,
+     * verbatim inline duplicate, used by liquidate() when debtAsset == DUSD. The three
+     * agree today, and property_dusdDebtReconciles depends on them continuing to — a
+     * change here has to be mirrored there.
+     *
+     * The scaled reduction rounds DOWN, so the position is credited with no more relief
+     * than the payment warrants. Same direction repayDUSD used before this extraction.
+     */
+    function _retireDusdDebt(uint256 positionId, uint256 amount) private {
         uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
         if (scaled > __scaledDusdDebt[positionId]) {
             scaled = __scaledDusdDebt[positionId];
         }
         __scaledDusdDebt[positionId] -= scaled;
         totalScaledDusdDebt -= scaled;
+    }
 
-        __DUSD.burn(msg.sender, amount);
-        emit DusdRepay(positionId, msg.sender, amount);
+    /**
+     * @dev burn DUSD in exchange for collateral at par, less REDEMPTION_FEE_BPS.
+     *
+     * This is what makes the peg real. Valuing DUSD debt at $1 in userBorrowedAmountUSD
+     * was an assumption until this existed; with redemption, arbitrage enforces it —
+     * below $1 - fee, buying DUSD and redeeming it here is profitable, which removes
+     * supply until the discount closes.
+     *
+     * The caller names the target, exactly as liquidate() does. The gate is the INVERSE
+     * of liquidate()'s: only HEALTHY positions are redeemable. Redemption cancels debt at
+     * par while removing collateral, so it improves the target's health factor whenever
+     * hf > threshold * (1 - fee) on the ordinary path, and hf > threshold on the
+     * backstopped one because the gross figure leaves the position — at most 0.8955 and
+     * 0.90 at the shipped parameters, and below WAD for any admissible threshold, since
+     * the constructor caps liquidationThreshold at 100. Gating at WAD
+     * sits above that with room to spare and partitions the book cleanly: healthy
+     * positions are redeemable and always improved, unhealthy ones are liquidatable and
+     * belong to the other engine. Nobody can be pushed further underwater by a redeemer.
+     *
+     * Gating on RISK instead — only redeeming against the shakiest positions — would be
+     * backwards: a fully healthy book would then have nothing to redeem against, and the
+     * peg floor would vanish exactly when the protocol is in good shape.
+     */
+    function redeem(uint256 positionId, address collateralAsset, uint256 dusdAmount)
+        external
+        nonReentrant
+        moreThanZero(dusdAmount)
+        isAllowedToken(collateralAsset)
+    {
+        _redeem(positionId, collateralAsset, dusdAmount, false);
+    }
+
+    /**
+     * @dev redeem against a pool that cannot spare the liquidity, funding it from reserves.
+     *
+     * Identical to redeem() but for two things: the collateral cap may draw on reserves
+     * converted to a protocol-owned deposit (_commitBackstop), and the fee is booked to
+     * pool.reserves rather than left with the position, because the protocol supplied the
+     * liquidity. The redeemer receives the same net amount either way, so the arbitrage
+     * threshold is unchanged at $1 - REDEMPTION_FEE_BPS.
+     *
+     * A separate entry point rather than an automatic fallback, matching
+     * liquidateWithBackstop: the borrower silently loses the fee on this path, so a
+     * redeemer has to choose it rather than be moved onto it.
+     */
+    function redeemWithBackstop(uint256 positionId, address collateralAsset, uint256 dusdAmount)
+        external
+        nonReentrant
+        moreThanZero(dusdAmount)
+        isAllowedToken(collateralAsset)
+    {
+        _redeem(positionId, collateralAsset, dusdAmount, true);
+    }
+
+    function _redeem(uint256 positionId, address collateralAsset, uint256 dusdAmount, bool useBackstop)
+        private
+    {
+        if (!__positionContract.exists(positionId)) {
+            revert Desultory__PositionDoesNotExist(positionId);
+        }
+
+        _accrueAll();
+
+        uint256 debt = getPositionDusdDebt(positionId);
+        if (debt == 0) {
+            revert Desultory__NoDusdDebt(positionId);
+        }
+
+        uint256 hf = healthFactor(positionId);
+        if (hf < WAD) {
+            revert Desultory__NotRedeemable(positionId, hf);
+        }
+
+        // clamp rather than revert, so a redeemer that loses a race takes a partial fill
+        // instead of burning a transaction — the same reasoning as liquidate's close factor
+        if (dusdAmount > debt) {
+            dusdAmount = debt;
+        }
+
+        // How much collateral leaves the POSITION. On the ordinary path that is the net
+        // figure and the fee simply stays behind as collateral the position no longer owes
+        // debt against. On the backstop path the gross figure leaves and the difference is
+        // booked to reserves, because the protocol supplied the liquidity.
+        uint256 removed = _usdToTokenAmount(
+            collateralAsset,
+            useBackstop ? dusdAmount : RedemptionMath.collateralFromDusd(dusdAmount, REDEMPTION_FEE_BPS)
+        );
+
+        // A zero delivery must never reach _commitBackstop. A dusdAmount small enough
+        // relative to the collateral's unit price floors `removed` to zero — one wei of
+        // DUSD against WETH at $2000, say — and without this guard the `removed > cap`
+        // branch below is 0 > 0, so it never fires its own ZeroAmount check and the call
+        // still commits reserves, converting them into backstopScaledDeposits that
+        // releaseBackstop cannot recover while the pool stays saturated. A zero-delivery
+        // redemption burns DUSD for nothing on the ordinary path too, so the guard sits
+        // ahead of both.
+        if (removed == 0) {
+            revert Desultory__ZeroAmount();
+        }
+
+        // The position may not hold that much, and the pool may not be able to spare it —
+        // the same bound withdraw(), borrow() and liquidate() all enforce. Cap what leaves
+        // the position, since that is what both constraints actually bind, then recompute
+        // the DUSD burned DOWN from the capped figure. Burning the full amount for a short
+        // delivery is the same class of bug as liquidate's step 5.
+        uint256 cap = getPositionCollateralForToken(positionId, collateralAsset);
+        if (removed < cap) {
+            cap = removed;
+        }
+        if (useBackstop) {
+            _commitBackstop(collateralAsset, cap);
+        }
+        {
+            uint256 available = getAvailableLiquidity(collateralAsset);
+            if (available < cap) {
+                cap = available;
+            }
+        }
+        if (removed > cap) {
+            removed = cap;
+            uint256 removedUSD = getValueUSD(collateralAsset, removed);
+            dusdAmount =
+                useBackstop ? removedUSD : RedemptionMath.dusdFromCollateral(removedUSD, REDEMPTION_FEE_BPS);
+            if (dusdAmount > debt) {
+                dusdAmount = debt;
+            }
+            if (dusdAmount == 0) {
+                revert Desultory__ZeroAmount();
+            }
+        }
+
+        // the redeemer's share is always the net figure, on both paths, so the arbitrage
+        // condition stays a single clean number rather than something computed per position
+        uint256 toRedeemer =
+            _usdToTokenAmount(collateralAsset, RedemptionMath.collateralFromDusd(dusdAmount, REDEMPTION_FEE_BPS));
+        if (toRedeemer > removed) {
+            toRedeemer = removed;
+        }
+        uint256 feeToReserves = removed - toRedeemer;
+
+        // --- effects ---
+        // _seizeCollateral already does exactly this shape: decrement the position's
+        // deposit by `removed` and book `feeToReserves` to pool.reserves.
+        _seizeCollateral(positionId, collateralAsset, removed, feeToReserves);
+        _retireDusdDebt(positionId, dusdAmount);
+
+        // --- interactions ---
+        __DUSD.burn(msg.sender, dusdAmount);
+        IERC20(collateralAsset).safeTransfer(msg.sender, toRedeemer);
+
+        emit Redemption(msg.sender, positionId, collateralAsset, dusdAmount, toRedeemer, feeToReserves);
     }
 
     /// @dev a position's debt in one asset, DUSD or a pool token
@@ -979,6 +1168,9 @@ contract Desultory is Ownable, ReentrancyGuard {
      */
     function _retireDebt(uint256 positionId, address asset, uint256 amount) private {
         if (asset == address(__DUSD)) {
+            // this branch is an inline copy of _retireDusdDebt, which repayDUSD and the
+            // redemption path share. Keep the two in step — property_dusdDebtReconciles
+            // assumes every DUSD retirement uses this same arithmetic.
             uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
             if (scaled > __scaledDusdDebt[positionId]) {
                 scaled = __scaledDusdDebt[positionId];
@@ -1153,10 +1345,12 @@ contract Desultory is Ownable, ReentrancyGuard {
             }
         }
 
-        // DUSD is valued at $1. This is an assumption, not a fact: it holds only while
-        // the peg does, and the peg mechanism is not designed yet (project C2). If DUSD
-        // trades above $1, debt here is understated and positions are under-collateralized
-        // in real terms.
+        // DUSD is valued at $1, and that par convention is what redeem() enforces: below
+        // $1 - REDEMPTION_FEE_BPS, buying DUSD and redeeming it against a healthy position
+        // is profitable, which burns supply until the discount closes. So this is a
+        // mechanism now, not a bare assumption. The floor is one-sided, though — nothing
+        // caps DUSD ABOVE $1, the direction that understates debt here, and supply caps
+        // (project C2.2) are not built.
         totalUSD += getPositionDusdDebt(position);
 
         return totalUSD;

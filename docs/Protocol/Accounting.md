@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 7f90054
+verified-against: 2502b9a
 ---
 
 # Accounting
@@ -70,11 +70,23 @@ easy to get wrong.
 
 **The reserve cut is taken before lenders.** `RESERVE_FACTOR` is `1_000` BPS = 10%.
 Ten percent of accrued interest goes to `pool.reserves`; the remaining 90% grows
-`liquidityIndex`. Reserves accumulate in token units, and two other paths feed the same
-pot: the whole DUSD stability fee (see [[Cross-Chain]]) and `LIQ_PROTOCOL_SHARE` — 30% —
-of every liquidation bonus (see [[Liquidations]]).
+`liquidityIndex`. Reserves accumulate in token units, and two other paths feed the same pot:
+`LIQ_PROTOCOL_SHARE` — 30%, or `LIQ_BACKSTOP_SHARE`, 70% — of every liquidation bonus
+(see [[Liquidations]]), and, new with redemption, the redemption fee on the
+**backstopped** path only. The DUSD stability fee is a fourth revenue stream but lands in
+`dusdReserves`, not here, and is not a token balance at all (see [[DUSD]]).
 
-`pool.reserves` now has two outlets and two inlets.
+That third inlet is worth stating precisely, because the ordinary path does not have it.
+`redeem` removes only the net figure from the position, so the 0.5% fee simply stays
+there as collateral the position no longer owes debt against, and `pool.reserves` never
+sees it. `redeemWithBackstop` removes the gross figure and books the difference to
+`pool.reserves` through `_seizeCollateral` — the protocol converted its own reserves to
+make the fill possible, so the protocol keeps the fee. The redeemer receives the same net
+amount either way. See [[DUSD]] and [[0007-dusd-redemption]].
+
+`pool.reserves` therefore has two outlets — `withdrawReserves` and `_commitBackstop` —
+and four inlets: the interest cut, the liquidation bonus share, the backstopped redemption
+fee, and `releaseBackstop` returning committed capital.
 
 `withdrawReserves(token, to, amount)` pays a pool's reserves out to the owner's chosen
 recipient. It accrues first, so the figure it reads is settled rather than stale. It is
@@ -87,8 +99,9 @@ sides of *cash = deposits + reserves − debt* fall together and depositors are 
 
 `_commitBackstop(token, want)` is the second outlet, and it moves no tokens. It converts
 reserves into `pool.backstopScaledDeposits` — the protocol's own deposit, credited to
-`totalScaledDeposits` alongside every lender's — so a backstopped liquidation can seize
-against cash the availability view does not report. Only the split between "protocol
+`totalScaledDeposits` alongside every lender's — so a backstopped liquidation **or a
+backstopped redemption** can take collateral against cash the availability view does not
+report. Only the split between "protocol
 revenue" and "deposit base" changes, so the identity again holds by construction. The
 credit rounds down per the policy below, and reserves fall by the exact round-trip of the
 scaled figure so no dust drifts between the two lines. See [[Liquidations]].
@@ -106,9 +119,15 @@ routinely sits with deposits below debt and reports zero available while holding
 cash.
 
 **DUSD reserves are not withdrawable.** `dusdReserves` is a claim, not a balance:
-`borrowDUSD` mints to the borrower and `repayDUSD` burns from the payer, so the protocol
-never holds DUSD. Paying it out would mean minting unbacked supply. See
-[[0005-treasury-withdrawal]].
+`borrowDUSD` mints to the borrower, and `repayDUSD` and `redeem` both burn from whoever
+pays, so the protocol never holds DUSD. Paying it out would mean minting unbacked supply.
+See [[0005-treasury-withdrawal]].
+
+Redemption sharpened that argument rather than settling it. There is now a route from
+DUSD to collateral, so the claim is denominated in a unit with a floor under it — but
+minting against no new collateral now dilutes *redemption backing* rather than nothing at
+all. The outlet is project C2.3 and is still open; see [[DUSD]] and
+[[0007-dusd-redemption]].
 
 ## Rounding policy
 
@@ -172,3 +191,5 @@ That is what `Desultory__InsufficientLiquidity` means.
 - [[Oracles]] — how balances become USD for the health check
 - [[Liquidations]] — the backstop that commits reserves as a deposit, and releases them back
 - [[0006-internal-liquidation-backstop]] — why reserves are converted rather than spent
+- [[DUSD]] — the stability fee, `dusdReserves`, and the redemption fee's two destinations
+- [[0007-dusd-redemption]] — the fee-destination rule, and why `dusdReserves` stays put

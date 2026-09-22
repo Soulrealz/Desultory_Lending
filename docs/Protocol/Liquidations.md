@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 7f90054
+verified-against: 2502b9a
 ---
 
 # Liquidations
@@ -114,6 +114,14 @@ cash, and that is the **normal** post-accrual state — `borrowIndex` grows fast
 `liquidityIndex` by exactly the reserve cut on every accrual (see [[Accounting]]). The
 pool does not have to be drained for this to bite.
 
+**This mechanism is no longer liquidation's alone.** `_commitBackstop` has a second
+caller: `redeemWithBackstop` funds a DUSD redemption against a cash-poor pool through
+exactly the same path, sized to the collateral the redemption may remove. Everything
+described below — the sizing off raw figures, the down-rounded credit, the no-token-moves
+custody argument, `releaseBackstop` as the only way back — applies identically on that
+path. Read this section as "the internal backstop", not "the liquidation backstop". See
+[[DUSD]] and [[0007-dusd-redemption]].
+
 `_commitBackstop(token, want)` converts reserves into a protocol-owned deposit so a
 seizure of up to `want` can proceed:
 
@@ -150,6 +158,10 @@ re-read fresh rather than incremented by an assumed amount, because the down-rou
 credit can land a wei short of what was asked for. A pool with no reserves commits
 nothing and `liquidateWithBackstop` then behaves exactly like `liquidate()`, including
 the same `Desultory__ZeroAmount` revert on a zero fill.
+
+`_redeem` orders its own commit for the same two reasons: after the cap is clamped to the
+collateral the position actually holds, and before `getAvailableLiquidity` is re-read
+fresh.
 
 `pool.backstopScaledDeposits` is a **subset** of `pool.totalScaledDeposits`, never a
 parallel figure. It is deliberately not a position, so `withdraw()` — which keys off
@@ -208,6 +220,9 @@ etc.) is out of scope for this project.
   the liquidator's payment is taken via `_retireDebt`, never a balance-sniff-then-fallback.
 - **Bad debt** — recognized and counted (`totalBadDebtUSD`), never socialized onto
   lenders via the index.
+- **Redemption is the other half of the book.** `redeem` requires
+  `healthFactor >= WAD`, the exact inverse of this engine's gate, so a position is
+  liquidatable or redeemable and never both. See [[DUSD]] and [[0007-dusd-redemption]].
 - **Internal backstop** — `liquidateWithBackstop` as a separate, opt-in entry point;
   reserves converted into a protocol-owned deposit rather than spent; the larger
   `LIQ_BACKSTOP_SHARE` taken out of the liquidator's bonus rather than charged to the
@@ -281,9 +296,16 @@ etc.) is out of scope for this project.
   `property_custodyReconciles` is `balance + borrows >= deposits + reserves`, so its
   right-hand side can gain up to **1 wei per commit** with nothing on the left to match.
   This is the one rounding direction on the whole backstop path that runs *against* the
-  pool rather than for it. It is acceptable because the bound is tight — at most 1 wei,
-  and every commit costs a real liquidation, so there is no way to grind it — and because
-  the pool's own cash is untouched either way.
+  pool rather than for it. It is acceptable because the bound is tight — at most 1 wei
+  per commit — and because the pool's own cash is untouched either way.
+
+  The bound used to carry a second argument: that every commit costs a real liquidation,
+  so there is no way to grind it. That argument no longer holds. `redeemWithBackstop`
+  reaches `_commitBackstop` against a **healthy** position, so a commit is now cheap and
+  permissionless. `_redeem` rejects a redemption that would deliver zero collateral
+  (`removed == 0`) before the commit can fire, which closes the free case; a redemption
+  that does deliver still commits against the pool's whole deficit rather than against
+  what it removes.
 
   `releaseBackstop` is safe under the same analysis, and the contrast is worth writing
   down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while
@@ -320,6 +342,8 @@ invariants the rewrite had to hold.
 - [[0004-liquidation-engine]] — the ADR recording why the engine was built this way
 - [[0006-internal-liquidation-backstop]] — the ADR recording the backstop, and correcting
   0004's framing of the cash-poor failure and of the rounding seam
+- [[0007-dusd-redemption]] — the inverse gate, and `_commitBackstop`'s second caller
+- [[DUSD]] — the redemption engine that shares this one's backstop
 - [[0005-treasury-withdrawal]] — `withdrawReserves`, the single exit the release path keeps
 - [[Invariants]] — the properties the backstop had to keep, including the new property 12
 - [[2026-06-10-project-assessment]] — the audit that first catalogued the seven defects
