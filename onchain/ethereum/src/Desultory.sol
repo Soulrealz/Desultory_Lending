@@ -1495,10 +1495,31 @@ contract Desultory is Ownable, ReentrancyGuard {
         pool.borrowIndex += (pool.borrowIndex * factor) / WAD;
         uint256 interest = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex) - totalDebt;
 
-        uint256 toReserves = (interest * RESERVE_FACTOR) / MAX_BPS;
+        // The reserve cut rounds UP, and that direction is load-bearing rather than
+        // cosmetic. property_borrowIndexOutpacesLiquidityIndex rests on this line
+        // removing something from the lender side on every accrual; flooring it meant
+        // `interest * 1000 / 10000` collapsed to ZERO for any interest below 10 wei, so
+        // in a dust-scale pool the reserve factor removed nothing and lenders took the
+        // whole wei. Against a 51-wei deposit base that moves liquidityIndex by 1/51 —
+        // far more than the rate moved borrowIndex — and the indexes invert on a single
+        // accrual. Ceiling keeps the cut non-zero whenever there is any interest at all.
+        //
+        // toReserves <= interest still holds for every interest >= 1, so this cannot
+        // reintroduce the leak the test above pins: the pool never distributes more than
+        // it charged. Rounding toward the pool is also the direction every other
+        // conversion here already takes.
+        uint256 toReserves = (interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS;
         pool.reserves += toReserves;
 
-        uint256 totalDeposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);
+        // The divisor rounds UP, and like the cut above that direction is load-bearing.
+        // The growth this produces is `distributed * trueDeposits / totalDeposits`, so a
+        // divisor floored BELOW the true deposit base credits lenders more than was
+        // charged — the same leak family the comment above describes, entering through
+        // the denominator instead of the numerator. At dust scale the understatement is
+        // large in relative terms: a base of 3 against a true 3.999 is 25% off, which no
+        // 10% reserve cut can absorb, and the indexes invert. Ceiling errs toward
+        // distributing slightly less than was charged, which is the safe direction.
+        uint256 totalDeposits = __fromScaledUp(pool.totalScaledDeposits, pool.liquidityIndex);
         if (totalDeposits > 0) {
             pool.liquidityIndex += (pool.liquidityIndex * (interest - toReserves)) / totalDeposits;
         }

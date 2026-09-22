@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2502b9a
+verified-against: 2df55c5
 ---
 
 # Accounting
@@ -54,7 +54,7 @@ flowchart TD
     D -->|no| E[rate = getBorrowRate util]
     E --> F["factor = rate * dt * WAD / (YEAR * MAX_BPS)"]
     F --> G["interest = totalDebt * factor / WAD"]
-    G --> H["toReserves = interest * 10%"]
+    G --> H["toReserves = ceil(interest * 10%)"]
     H --> I["borrowIndex += borrowIndex * factor / WAD"]
     I --> J[reserves += toReserves]
     J --> K["liquidityIndex += liquidityIndex * (interest - toReserves) / totalDeposits"]
@@ -68,9 +68,18 @@ after stamping `lastUpdate`. Idle time with no borrowers does not silently infla
 the indexes, so depositors earn nothing while nobody is borrowing. Correct, and
 easy to get wrong.
 
-**The reserve cut is taken before lenders.** `RESERVE_FACTOR` is `1_000` BPS = 10%.
-Ten percent of accrued interest goes to `pool.reserves`; the remaining 90% grows
-`liquidityIndex`. Reserves accumulate in token units, and two other paths feed the same pot:
+**The reserve cut is taken before lenders, and it rounds UP.** `RESERVE_FACTOR` is
+`1_000` BPS = 10%. Ten percent of accrued interest goes to `pool.reserves`; the remaining
+90% grows `liquidityIndex`.
+
+The ceiling is load-bearing rather than cosmetic. Invariant 3
+(`property_borrowIndexOutpacesLiquidityIndex`, see [[Invariants]]) is *justified* by this
+line withholding something on every accrual. While the cut floored, `interest * 1_000 /
+10_000` collapsed to zero for any `interest` below 10 wei, so in a dust-scale pool the
+reserve factor withheld nothing, lenders took the whole wei, and the indexes inverted on a
+single accrual. The fuzzer found it in shipped code; [[0008-reserve-cut-rounds-up]] records
+the diagnosis and the rejected alternatives. `toReserves <= interest` still holds for every
+`interest >= 1`, so the ceiling cannot reintroduce the leak described below. Reserves accumulate in token units, and two other paths feed the same pot:
 `LIQ_PROTOCOL_SHARE` — 30%, or `LIQ_BACKSTOP_SHARE`, 70% — of every liquidation bonus
 (see [[Liquidations]]), and, new with redemption, the redemption fee on the
 **backstopped** path only. The DUSD stability fee is a fourth revenue stream but lands in

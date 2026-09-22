@@ -23,3 +23,4 @@ which is what [[Protocol]] is for.
 - [[0005-treasury-withdrawal]] — token reserves are withdrawable; DUSD reserves are not
 - [[0006-internal-liquidation-backstop]] — reserves are committed as a protocol-owned deposit to fund a seizure
 - [[0007-dusd-redemption]] — DUSD is redeemable for collateral at par less a flat fee, against healthy positions only
+- [[0008-reserve-cut-rounds-up]] — the reserve cut ceilings, so dust pools cannot invert the indexes

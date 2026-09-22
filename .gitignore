@@ -8,6 +8,9 @@ broadcast/
 # Superpowers skill scratch output (specs/plans)
 docs/superpowers/
 
+# Subagent-driven-development scratch: ledgers, task briefs, reports, review diffs
+.superpowers/
+
 # Obsidian per-machine UI state
 docs/.obsidian/workspace.json
 docs/.obsidian/workspace-mobile.json
