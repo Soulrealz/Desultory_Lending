@@ -1495,7 +1495,20 @@ contract Desultory is Ownable, ReentrancyGuard {
         pool.borrowIndex += (pool.borrowIndex * factor) / WAD;
         uint256 interest = __fromScaledUp(pool.totalScaledBorrows, pool.borrowIndex) - totalDebt;
 
-        uint256 toReserves = (interest * RESERVE_FACTOR) / MAX_BPS;
+        // The reserve cut rounds UP, and that direction is load-bearing rather than
+        // cosmetic. property_borrowIndexOutpacesLiquidityIndex rests on this line
+        // removing something from the lender side on every accrual; flooring it meant
+        // `interest * 1000 / 10000` collapsed to ZERO for any interest below 10 wei, so
+        // in a dust-scale pool the reserve factor removed nothing and lenders took the
+        // whole wei. Against a 51-wei deposit base that moves liquidityIndex by 1/51 —
+        // far more than the rate moved borrowIndex — and the indexes invert on a single
+        // accrual. Ceiling keeps the cut non-zero whenever there is any interest at all.
+        //
+        // toReserves <= interest still holds for every interest >= 1, so this cannot
+        // reintroduce the leak the test above pins: the pool never distributes more than
+        // it charged. Rounding toward the pool is also the direction every other
+        // conversion here already takes.
+        uint256 toReserves = (interest * RESERVE_FACTOR + MAX_BPS - 1) / MAX_BPS;
         pool.reserves += toReserves;
 
         uint256 totalDeposits = __fromScaledDown(pool.totalScaledDeposits, pool.liquidityIndex);

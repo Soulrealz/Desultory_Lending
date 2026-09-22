@@ -64,4 +64,55 @@ contract AccrualLeak is Test, TargetFunctions, FoundryAsserts {
 
         assertLe(distributed, charged, "accrual distributed more than it charged");
     }
+
+    /**
+     * @dev the second accrual defect the fuzzer found, and the reason toReserves ceils.
+     *
+     * property_borrowIndexOutpacesLiquidityIndex is justified by the reserve factor:
+     * 10% of every accrual is removed from the lender side before liquidityIndex grows,
+     * so borrow growth strictly dominates. That argument fails at dust scale, because
+     * `toReserves = interest * RESERVE_FACTOR / MAX_BPS` floors to ZERO for any
+     * interest below 10 wei — the reserve factor removes nothing and lenders take the lot.
+     *
+     * It compounds with a second rounding: `interest` is the difference of two CEILINGS
+     * of totalScaledBorrows * borrowIndex / WAD, so a minuscule borrowIndex move still
+     * ticks it a full wei. That wei was manufactured by rounding rather than earned at
+     * the rate, and against a 51-wei deposit base it moves liquidityIndex by 1/51 — far
+     * more than the rate moved borrowIndex.
+     *
+     * 51 scaled deposits and 45 scaled borrows are the figures the failing pool state
+     * carried. One accrual is enough to invert the indexes.
+     */
+    function test_dustPoolDoesNotLetLiquidityIndexOvertakeBorrowIndex() public {
+        address lender = actors[0];
+        address duster = actors[1];
+
+        // real borrowing capacity, so the dust pool below can actually be drawn on
+        vm.prank(lender);
+        desultory.deposit(0, address(usdc), 500_000e18); // position 1
+
+        // a WETH pool holding dust, almost all of it lent out
+        vm.prank(duster);
+        desultory.deposit(0, address(weth), 51); // position 2
+        vm.prank(lender);
+        desultory.borrow(1, address(weth), 45);
+
+        Desultory.Pool memory before = desultory.getPoolInfo(address(weth));
+        assertEq(before.totalScaledDeposits, 51, "fixture must hold dust-scale deposits");
+
+        vm.warp(block.timestamp + 3 days);
+        wethFeed.updateAnswer(WETH_INITIAL_PRICE); // OracleLib times out after 3 hours
+        usdcFeed.updateAnswer(USDC_INITIAL_PRICE);
+
+        // poke accrual on the WETH pool with a 1-wei repayment
+        vm.prank(lender);
+        desultory.repay(1, address(weth), 1);
+
+        Desultory.Pool memory p = desultory.getPoolInfo(address(weth));
+        console.log("borrowIndex   ", p.borrowIndex);
+        console.log("liquidityIndex", p.liquidityIndex);
+        console.log("reserves      ", p.reserves);
+
+        assertGe(p.borrowIndex, p.liquidityIndex, "borrowIndex fell behind liquidityIndex");
+    }
 }
