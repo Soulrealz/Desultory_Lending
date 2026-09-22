@@ -80,9 +80,14 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   after `seizeCap` is clamped to held collateral and the requested amount, and before
   `getAvailableLiquidity` is re-read fresh, converts up to `pool.reserves` into
   `pool.backstopScaledDeposits` (a SUBSET of `totalScaledDeposits`, not a position, so
-  `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures, credit rounds
-  down, reserves fall by the exact round-trip; no token moves, so custody holds by
-  construction. **`_commitBackstop` has two callers**: `_liquidate` and `_redeem` — the
+  `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures as
+  `deficit + want`, credit rounds down, reserves fall by the exact round-trip; no token
+  moves, so custody holds by construction. The deficit term is forced, not slack:
+  availability *is* `deposits - debt`, so a commit that does not clear the shortfall first
+  unlocks nothing. Nothing above the deficit is spent except `want`, and a commit that
+  would still land at or below the deficit is refused outright (defence in depth — the
+  callers' zero-fill revert already unwound it). See ADR 0006 and the "Commit sizing"
+  section of `docs/Protocol/Liquidations.md`. **`_commitBackstop` has two callers**: `_liquidate` and `_redeem` — the
   redemption path funds a cash-poor pool through exactly the same machinery, sized to the
   collateral the redemption may remove. `releaseBackstop(token, amount)` (owner-only) is the mirror: accrues,
   mirrors `withdraw()`'s shape, gates on `getAvailableLiquidity` (unlike `withdrawReserves`

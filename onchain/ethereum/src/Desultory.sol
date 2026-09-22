@@ -888,8 +888,33 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
         need -= deposits;
 
+        // What the commit has to buy is `want` of AVAILABILITY, and availability is
+        // deposits - debt. So in a saturated pool the deficit term is not padding that
+        // could be trimmed: without clearing it first, nothing added is reachable by the
+        // caller. `need` is therefore deficit + want and never more, which is the
+        // proportionality that does hold — a small request does not scale with reserves.
+        uint256 deficit = debt > deposits ? debt - deposits : 0;
+
         if (need > pool.reserves) {
             need = pool.reserves;
+        }
+
+        // ...but a commit CLAMPED below the deficit buys nothing: availability afterwards is
+        // `need - deficit`, so when reserves cannot cover the deficit the caller still has
+        // zero to seize. Refuse it rather than converting reserves into
+        // backstopScaledDeposits that unlocked nothing.
+        //
+        // Defence in depth, deliberately, NOT a bug fix — and worth being precise about,
+        // because the obvious claim here is wrong. Without this branch the commit is not a
+        // persisted loss: both callers re-read getAvailableLiquidity afterwards, clamp to
+        // it, and revert Desultory__ZeroAmount on a zero fill, and that revert unwinds the
+        // commit along with everything else. The branch is worth keeping anyway, because it
+        // makes the reachability condition local to the sizing rather than an emergent
+        // property of two callers' later clamps, but it removes no loss that survives the
+        // transaction. testBackstopSpendsNothingWhenReservesCannotCoverTheDeficit passes
+        // with or without it, for exactly that reason.
+        if (need <= deficit) {
+            return;
         }
 
         // the scaled credit rounds DOWN, the same direction deposit() uses: the protocol
@@ -917,9 +942,15 @@ contract Desultory is Ownable, ReentrancyGuard {
         // second caller and it is gated on healthFactor >= WAD, so a commit is cheap and
         // permissionless: any redeemer can fire one against any healthy position. What
         // stops a zero-value call from triggering one is _redeem's `removed == 0` guard,
-        // which runs before this function is reached. A larger dusdAmount still triggers a
-        // full-deficit commit sized on the pool's own shortfall rather than on `want`;
-        // that shape is deliberate and out of scope here. The seam remains a documented
+        // which runs before this function is reached. A larger dusdAmount still converts
+        // deficit + want of reserves, dominated by the deficit in a saturated pool, and
+        // that is now understood rather than merely deferred: it is forced. Availability IS
+        // deposits - debt, so the shortfall has to be cleared before any part of `want`
+        // becomes reachable, and a commit sized on `want` alone would unlock nothing. What
+        // the sizing does guarantee is that nothing above the deficit is spent except
+        // `want` itself. The residual cost is that a small request can move a large slice
+        // of reserves into backstopScaledDeposits, recoverable only through
+        // releaseBackstop once the pool is liquid again. The seam remains a documented
         // rounding seam rather than a solvency concern. See docs/Protocol/Liquidations.md.
         //
         // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so

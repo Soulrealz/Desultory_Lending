@@ -321,13 +321,45 @@ etc.) is out of scope for this project.
   reaches `_commitBackstop` against a **healthy** position, so a commit is now cheap and
   permissionless. `_redeem` rejects a redemption that would deliver zero collateral
   (`removed == 0`) before the commit can fire, which closes the free case; a redemption
-  that does deliver still commits against the pool's whole deficit rather than against
-  what it removes.
+  that does deliver still commits against the pool's whole deficit as well as against what
+  it removes. See "Commit sizing" below for why that is forced rather than sloppy.
 
   `releaseBackstop` is safe under the same analysis, and the contrast is worth writing
   down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while
   `pool.reserves` rises by exactly `amount`. The property's right-hand side is
   non-increasing across a release.
+
+## Commit sizing
+
+`_commitBackstop(token, want)` commits `deficit + want`, where `deficit` is the pool's own
+shortfall (`debt - deposits`). In a saturated pool the deficit term dominates, so a small
+seizure or redemption can move a large slice of `pool.reserves` into
+`backstopScaledDeposits` — where `releaseBackstop` cannot recover it while the pool stays
+saturated, because its availability gate is exactly the figure that has not moved.
+
+That was once written down as deferred. It is not: it is **forced**. Availability is
+`deposits - debt`, so a commit that does not first clear the deficit unlocks nothing at
+all, and a commit sized on `want` alone would leave the caller with nothing to seize. There
+is no sizing that serves the request and skips the shortfall.
+
+What the sizing does guarantee, and what
+`testBackstopCommitScalesWithTheRequestNotTheReservePot` pins, is that **nothing above the
+deficit is spent except `want` itself**: two runs against an identical pool commit
+different amounts only because their requests differ. The commit tracks the request, not
+the size of the treasury.
+
+Two consequences worth stating plainly:
+
+- Reserves converted this way are not lost. They stay protocol-owned deposits, earning the
+  lender index, recoverable through `releaseBackstop` once the pool is liquid again. The
+  cost is liquidity and timing, not solvency.
+- A commit clamped *below* the deficit can unlock nothing, and `_commitBackstop` now
+  refuses it. This is defence in depth rather than a fix for a live loss: both callers
+  re-read `getAvailableLiquidity`, clamp to it, and revert `Desultory__ZeroAmount` on a
+  zero fill, and that revert already unwound the commit.
+  `testBackstopSpendsNothingWhenReservesCannotCoverTheDeficit` passes with the guard
+  removed, and says so. The guard's value is that the condition lives in the sizing instead
+  of being emergent from two callers' later clamps.
 
 ## Superseded framings
 
