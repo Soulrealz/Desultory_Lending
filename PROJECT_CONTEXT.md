@@ -80,9 +80,14 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   after `seizeCap` is clamped to held collateral and the requested amount, and before
   `getAvailableLiquidity` is re-read fresh, converts up to `pool.reserves` into
   `pool.backstopScaledDeposits` (a SUBSET of `totalScaledDeposits`, not a position, so
-  `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures, credit rounds
-  down, reserves fall by the exact round-trip; no token moves, so custody holds by
-  construction. **`_commitBackstop` has two callers**: `_liquidate` and `_redeem` — the
+  `withdraw()` cannot reach it). Sized off the **raw** deposits/debt figures as
+  `deficit + want`, credit rounds down, reserves fall by the exact round-trip; no token
+  moves, so custody holds by construction. The deficit term is forced, not slack:
+  availability *is* `deposits - debt`, so a commit that does not clear the shortfall first
+  unlocks nothing. Nothing above the deficit is spent except `want`, and a commit that
+  would still land at or below the deficit is refused outright (defence in depth — the
+  callers' zero-fill revert already unwound it). See ADR 0006 and the "Commit sizing"
+  section of `docs/Protocol/Liquidations.md`. **`_commitBackstop` has two callers**: `_liquidate` and `_redeem` — the
   redemption path funds a cash-poor pool through exactly the same machinery, sized to the
   collateral the redemption may remove. `releaseBackstop(token, amount)` (owner-only) is the mirror: accrues,
   mirrors `withdraw()`'s shape, gates on `getAvailableLiquidity` (unlike `withdrawReserves`
@@ -148,7 +153,20 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
 - `releaseBackstop(token, amount)` (owner-only) returns committed backstop capital to
   `pool.reserves` — see the liquidation backstop above. It moves no tokens; cash still
   leaves only through `withdrawReserves`.
-- Token add/remove is still ungoverned.
+- `addToken(TokenConfig)` / `setTokenRetired(token, bool)` (owner-only) are the listing
+  admin. Both the constructor and `addToken` go through one private `_listToken`, so the
+  risk-parameter validation and the `MAX_SUPPORTED_TOKENS = 32` cap are shared rather than
+  duplicated — `liquidationThreshold <= 100` is quantified over every listed token by ADR
+  0007's and ADR 0008's safety arguments. `addToken` also rejects a duplicate, the zero
+  address, a zero feed, and DUSD (which is debt-only and would otherwise get a second
+  accounting path through `__pools`).
+  Retirement is **not** removal: `__tokenList` never shrinks and `__tokenInfos` is never
+  cleared, because every health computation iterates that list and dropping an entry would
+  make an open position's collateral *and* debt in that asset vanish from the sum at once.
+  A `notRetired` modifier gates exactly two entry points — `deposit` and `borrow` — so new
+  exposure stops while every unwind path (withdraw, repay, liquidate, redeem, release,
+  withdrawReserves) stays open. Reversible both ways. Backed by `__retiredTokens` as a side
+  mapping, so `getTokenInfo`'s ABI is unchanged. See ADR 0009.
 
 ### `src/PositionNFT.sol` — `Position` ERC721
 - Token id = position id; minted by Desultory (`deposit(0, …)`). The NFT IS
@@ -232,6 +250,11 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   reverts, accrue-before-evaluate ordering, seizure clamped to held collateral with the
   repayment back-solved down to match, and `totalBadDebtUSD` recognition (and
   non-recognition when collateral remains).
+- `TokenAdmin.t.sol` — 16 tests for `addToken`/`setTokenRetired`: the validation surface,
+  the 32-token cap on both the constructor and `addToken`, that a freshly listed pool
+  charges no interest for time before it was listed, and the load-bearing one — a retired
+  asset's position reports a bit-identical health factor and still repays, withdraws and
+  liquidates.
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
 - `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
@@ -262,9 +285,16 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   **in-target** rather than as a property (`dusdBurned >= USD value of collateral the
   redeemer received`): the spec's "redemption never lowers the target's health factor"
   turned out to be unassertable, because `redeem` accrues internally so a before/after
-  comparison charges realized interest to the redemption. Two coverage limitations are
-  recorded in `docs/Audit/Invariants.md` and must not be read past —
-  `desultory_redeemWithBackstop` fired **zero** times in 300,000 Medusa calls.
+  comparison charges realized interest to the redemption. `warp` was found to be leaving BOTH price feeds stale
+  (`OracleLib.TIMEOUT` is 3 hours, `MAX_WARP` is 30 days), so almost every price-reading
+  target — borrow, repay, withdraw, redeem, liquidate — reverted for the rest of each
+  sequence: the campaigns were green largely because nothing was executing. `warp` now
+  re-posts each feed's current answer, price untouched. With that fixed, redemption target
+  selection was tightened, the redemption amount bound raised to the redeemer's balance so
+  `_redeem`'s two clamp branches are reachable, `desultory_saturatePool` was added to drive
+  a pool short on purpose, and `desultory_releaseBackstop`'s bound was re-derived to survive
+  the accrual the call itself performs. Measurements and the before/after counters are in
+  `docs/Audit/Invariants.md`; read that before trusting any campaign count.
   `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
   **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding

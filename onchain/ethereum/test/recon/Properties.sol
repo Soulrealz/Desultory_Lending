@@ -66,9 +66,25 @@ abstract contract Properties is BeforeAfter, Asserts {
         }
     }
 
-    /// @dev debt can never exceed deposits, and the reserve factor removes 10%
-    /// from the lender side before liquidityIndex grows, so borrow growth
-    /// strictly dominates. Both indexes start at WAD.
+    /// @dev both indexes start at WAD and accrue() moves them from the same charge:
+    /// borrowers are charged `interest`, and only `interest - toReserves` is handed to
+    /// lenders. What keeps the lender side from outrunning the borrower side is the two
+    /// ceilings in accrue()'s distribution step, both added by ADR 0008:
+    ///
+    /// - the reserve cut rounds UP, so it removes at least RESERVE_FACTOR of the charge
+    ///   and, in a dust pool, removes the whole of a 1-wei interest. Flooring it let the
+    ///   cut collapse to zero below 10 wei of interest and lenders took everything.
+    /// - the deposit divisor rounds UP, so liquidityIndex growth is never computed
+    ///   against an understated base. A floored base overstates each lender's share of
+    ///   what was charged, which is the same leak entering through the denominator.
+    ///
+    /// Note what this comment deliberately no longer claims. "debt can never exceed
+    /// deposits" is NOT a standing invariant: borrowing is bounded by
+    /// getAvailableLiquidity (deposits - debt), but seizure and the backstop can leave a
+    /// pool saturated past its deposit base. And the old "a ~10% deficit is needed to
+    /// trip this" framing is false — ADR 0008's second reproduction inverted the indexes
+    /// at deposits == debt == 3 scaled, on rounding alone. The property rests on the
+    /// roundings, not on a margin between the two sides.
     function property_borrowIndexOutpacesLiquidityIndex() public {
         for (uint256 i = 0; i < tokens.length; i++) {
             Desultory.Pool memory pool = desultory.getPoolInfo(tokens[i]);

@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 75a675f
+verified-against: 8847270
 ---
 
 # Positions
@@ -25,6 +25,13 @@ repaying someone's debt both make that position strictly healthier — there is 
 attack in letting a stranger do it for you, and permissionless repay is what makes
 third-party liquidation bots possible. Withdrawing and borrowing extract value, so
 they check ownership.
+
+Orthogonal to the caller check, `deposit` and `borrow` also carry `notRetired(token)` —
+the only two entry points that do. A retired asset takes no new exposure, while `withdraw`,
+`repay` and every liquidation and redemption path stay open so an existing position can
+still unwind. Retirement never removes the asset from `__tokenList`, so a retired token's
+collateral and debt keep counting in every figure below exactly as before. See
+[[0009-token-listing-admin]].
 
 `deposit(0, token, amount)` mints a fresh position to `msg.sender` and deposits
 into it. A single address can hold any number of positions, and they are
@@ -84,8 +91,10 @@ gate stays permanently disabled because `_protocol` is still the zero address.
 
 ## Known gap
 
-`src/PositionNFT.sol` has no SPDX license identifier. Every other source file
-does.
+Several files have no SPDX license identifier: `src/Desultory.sol`,
+`src/PositionNFT.sol`, `src/governance/VoteToken.sol`, `script/Config.s.sol`,
+`script/Deploy.s.sol` and `test/Desultory.t.sol`. The rest of `src/` (`DUSD.sol`,
+`crosschain/Adapter.sol`, all three libraries) carries `UNLICENSED`.
 
 ## Related
 

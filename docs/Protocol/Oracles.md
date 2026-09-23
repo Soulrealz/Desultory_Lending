@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 5db9f71
+verified-against: edaa61a
 ---
 
 # Oracles
@@ -22,9 +22,12 @@ attacker who can predict which direction can drain it. Freezing is a denial of
 service; continuing is a loss of funds.
 
 The flip side, unhandled today: if a feed goes down for longer than 3 hours,
-**every** state-changing function reverts, because they all reach `getValueUSD`.
-Deposits, repayments, and liquidations all stop — including the liquidations that
-would protect the protocol. `TIMEOUT` is a compile-time constant with no override.
+**every** function that values a position reverts, because they all reach
+`getValueUSD` — and the valuation loops run over *all* whitelisted tokens, so one dead
+feed freezes positions holding any asset. `withdraw`, `borrow`, `borrowDUSD` /
+`borrowDUSDTo`, `redeem` and liquidation all stop — including the liquidations that
+would protect the protocol. Only `deposit` and `repay` keep working, since neither
+touches a price. `TIMEOUT` is a compile-time constant with no override.
 
 ## Decimal normalization
 

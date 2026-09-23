@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2502b9a
+verified-against: edaa61a
 ---
 
 # DUSD
@@ -24,18 +24,20 @@ redemptions) and `Adapter` (mints authorized from another chain).
 
 ## The supply lifecycle
 
-Three things move DUSD supply, and exactly three:
+Four things move DUSD supply:
 
 | Event | Supply | Debt | Collateral |
 |---|---|---|---|
 | `borrowDUSD` / `borrowDUSDTo` | **+** mint | **+** recorded at home | untouched |
 | `repayDUSD` | **−** burn from the payer | **−** retired | untouched |
 | `redeem` / `redeemWithBackstop` | **−** burn from the redeemer | **−** retired, at par | **−** leaves the position |
+| `liquidate` with `debtAsset == DUSD` | **−** burn from the liquidator | **−** retired, at par | **−** seized |
 
 The first two are symmetric and voluntary: the borrower creates the liability and the
-borrower settles it. The third is neither — a **third party** retires someone else's debt
-and takes collateral for doing it. That asymmetry is what earns DUSD its own note, and it
-is the entire peg mechanism.
+borrower settles it. The last two are neither — a **third party** retires someone else's
+debt and takes collateral for doing it. Redemption is the one that acts on *healthy*
+positions, and that asymmetry is what earns DUSD its own note: it is the entire peg
+mechanism. The liquidation branch is the mirror gate and belongs to [[Liquidations]].
 
 Debt is stored scaled, outside `__pools`, and DUSD is never an entry in `__tokenList`:
 
@@ -46,12 +48,14 @@ uint256 public dusdReserves;
 mapping(uint256 position => uint256 scaled) private __scaledDusdDebt;
 ```
 
-Both retirement paths — `repayDUSD` and `_redeem` — go through the **same** private
-helper, `_retireDusdDebt(positionId, amount)`, which scales down (crediting no more relief
+All three retirement paths — `repayDUSD`, `_redeem`, and `_retireDebt`'s DUSD branch
+(`liquidate` with `debtAsset == DUSD`) — go through the **same** private helper,
+`_retireDusdDebt(positionId, amount)`, which scales down (crediting no more relief
 than the payment warrants) and clamps to the position's stored scaled debt. It was
-extracted from `repayDUSD` when redemption was added rather than copied, which is what
-makes `property_dusdDebtReconciles` hold by construction instead of by two implementations
-agreeing. See [[Invariants]].
+extracted from `repayDUSD` when redemption was added, and the liquidation branch's
+verbatim inline copy was folded into it afterwards, which is what makes
+`property_dusdDebtReconciles` hold by construction instead of by separate
+implementations agreeing. See [[Invariants]].
 
 ## The stability fee
 
@@ -221,14 +225,17 @@ Token reserves in `pool.reserves` are a different thing entirely and do leave, t
 
 - `test/RedemptionMath.t.sol` — the fee pair in isolation, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
-- `test/Desultory.t.sol` — eleven redemption tests: the happy path, the fee staying with
+- `test/Desultory.t.sol` — twelve redemption tests: the happy path, the fee staying with
   the position, the health-factor improvement, the unhealthy-position revert and its
   liquidatable counterpart, the no-DUSD-debt revert, the clamp to outstanding debt, and
-  four covering the backstopped path (ordinary redeem cannot fill against a saturated
-  pool, the backstopped one can, the fee lands in reserves, custody holds).
+  five covering the backstopped path (ordinary redeem cannot fill against a saturated
+  pool, the backstopped one can, the fee lands in reserves, custody holds, and a one-wei
+  backstopped redemption commits nothing).
 - `test/recon/` — `desultory_redeem` and `desultory_redeemWithBackstop` on the fuzzing
-  surface, with an in-target assertion. Read [[Invariants]] before trusting the counts:
-  the backstopped target fired **zero** times in 300,000 calls.
+  surface, with an in-target assertion. The backstopped target used to fire **zero** times
+  in 300,000 calls; both it and the two clamp branches are now reachable, after `warp` was
+  found to be leaving the price feeds stale and killing most of the harness. Read
+  [[Invariants]] for the measurements before trusting any count here.
 
 ## Related
 

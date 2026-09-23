@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: d396fde
+verified-against: edaa61a
 ---
 
 # Interest Rate Model
@@ -15,7 +15,7 @@ pulled in before it is exhausted.
 `getUtilization(token)` is `totalDebt / totalDeposits` in BPS, capped at
 `MAX_BPS` (10 000 = 100%), and `0` for an empty pool.
 
-`totalDeposits` is `pool.totalScaledDeposits`, which since
+`totalDeposits` is `pool.totalScaledDeposits` read back through `__fromScaledDown`, which since
 [[0006-internal-liquidation-backstop]] includes `pool.backstopScaledDeposits` — the
 protocol's own deposit line, funded out of reserves to let a seizure proceed against a
 cash-poor pool. So a backstop commit **lowers measured utilization**, and it does so
@@ -34,13 +34,16 @@ than from anything in this module, which is otherwise untouched by the backstop.
 
 Defaults set in the `Desultory` constructor:
 
-| Breakpoint | Utilization | Rate at that point |
-|---|---|---|
-| base | 0% | 1% |
-| low | 15% | 2% |
-| normal | 80% | 7% |
-| high | 95% | 35% |
-| extreme | 100% | 65% |
+| Breakpoint | Utilization | Segment rate | Rate at that point |
+|---|---|---|---|
+| base | 0% | 1% | 1% |
+| low | 15% | 2% | 3% |
+| normal | 80% | 7% | 8% |
+| high | 95% | 35% | 36% |
+| extreme | 100% | 65% | 66% |
+
+The stored parameter is the segment rate; `baseBorrowRate` is added on top of it in every
+branch, which is where the last column comes from.
 
 Between breakpoints the rate is linear. The formula in each segment is
 `base + previousSegmentRate + (excessUtilization * rateGap / utilizationGap)`.
@@ -73,7 +76,8 @@ it back.
 ## Not implemented
 
 Rate parameters are set once in the constructor and there is no way to change
-them afterward — no owner, no setter. Retuning the curve currently means
+them afterward — the contract is `Ownable`, but no setter for `__interest` exists at
+all. Retuning the curve currently means
 redeploying. See [[Audit]].
 
 ## Related

@@ -862,6 +862,88 @@ contract DesultoryTest is Test {
         assertGt(desultory.getPoolInfo(usdc).backstopScaledDeposits, 0, "reserves were committed");
     }
 
+    /// @dev the deficit term in _commitBackstop is not padding that could be trimmed:
+    /// availability IS deposits - debt, so a saturated pool's shortfall has to be cleared
+    /// before anything the caller asks for becomes reachable. What must hold is that the
+    /// commit is deficit + want and stops there — the part above the deficit tracks the
+    /// request, and a bigger request is the only thing that makes the commit bigger.
+    function testBackstopCommitScalesWithTheRequestNotTheReservePot() public {
+        uint256 snap = vm.snapshotState();
+
+        (uint256 smallCommit, uint256 smallDeficit, uint256 reserves) = _commitFor(0.005e18);
+        vm.revertToState(snap);
+        (uint256 largeCommit, uint256 largeDeficit,) = _commitFor(0.03e18);
+
+        assertGt(smallCommit, 0, "the small request must still commit");
+        assertLt(smallCommit, reserves, "and must not take the whole reserve pot");
+
+        // the deficit is identical in both runs — same pool, same block — so any difference
+        // in the commit is the request, which is the proportionality being asserted
+        assertEq(smallDeficit, largeDeficit, "same pool state in both runs");
+        assertLt(smallCommit, largeCommit, "a larger seizure must commit more, and it is the only reason it does");
+    }
+
+    /// @dev returns (committed tokens, the pool's deficit before the call, reserves before)
+    function _commitFor(uint256 repayAmount) internal returns (uint256, uint256, uint256) {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        Desultory.Pool memory before = desultory.getPoolInfo(usdc);
+        uint256 deposits = before.totalScaledDeposits * before.liquidityIndex / 1e18;
+        uint256 debt = (before.totalScaledBorrows * before.borrowIndex + 1e18 - 1) / 1e18;
+
+        vm.prank(who);
+        desultory.liquidateWithBackstop(1, weth, usdc, repayAmount);
+
+        Desultory.Pool memory afterPool = desultory.getPoolInfo(usdc);
+        return (
+            afterPool.backstopScaledDeposits * afterPool.liquidityIndex / 1e18,
+            debt > deposits ? debt - deposits : 0,
+            before.reserves
+        );
+    }
+
+    /// @dev an unservable request must leave the treasury exactly where it found it.
+    /// Availability after a commit is `need - deficit`, so a pool whose reserves cannot
+    /// cover its own deficit can unlock nothing no matter how much it commits.
+    ///
+    /// Two things enforce that, and this test deliberately does not distinguish them:
+    /// _commitBackstop refuses to size a commit it cannot make reachable, and the caller
+    /// reverts Desultory__ZeroAmount on the zero fill, which unwinds any commit anyway.
+    /// The second alone is sufficient — this test passes with the sizing guard removed —
+    /// so read it as pinning the end-to-end guarantee, not as a regression test for the
+    /// guard. The guard's value is that the condition is local to the sizing rather than
+    /// emergent from two callers' later clamps.
+    function testBackstopSpendsNothingWhenReservesCannotCoverTheDeficit() public {
+        _saturatedUsdcPool();
+        address who = _wethLiquidator();
+
+        // Take the pool's cash out through the reserve door. Reserves stay large — this is
+        // NOT the empty-reserves case testBackstopWithNoReservesBehavesLikeOrdinaryLiquidation
+        // covers — but by the custody identity (cash = deposits + reserves - debt) a pool
+        // with no cash has reserves <= its deficit, so no commit can reach availability.
+        uint256 cash = MockERC20(usdc).balanceOf(address(desultory));
+        vm.prank(desultory.owner());
+        desultory.withdrawReserves(usdc, dead, cash);
+
+        Desultory.Pool memory pool = desultory.getPoolInfo(usdc);
+        uint256 deposits = pool.totalScaledDeposits * pool.liquidityIndex / 1e18;
+        uint256 debt = (pool.totalScaledBorrows * pool.borrowIndex + 1e18 - 1) / 1e18;
+        assertGt(pool.reserves, 0, "reserves must still be substantial");
+        assertLe(pool.reserves, debt - deposits, "but must sit at or below the deficit");
+
+        uint256 reservesBefore = pool.reserves;
+        uint256 backstopBefore = pool.backstopScaledDeposits;
+
+        vm.prank(who);
+        vm.expectRevert(Desultory.Desultory__ZeroAmount.selector);
+        desultory.liquidateWithBackstop(1, weth, usdc, 10e18);
+
+        pool = desultory.getPoolInfo(usdc);
+        assertEq(pool.reserves, reservesBefore, "reserves must be untouched");
+        assertEq(pool.backstopScaledDeposits, backstopBefore, "nothing may have been committed");
+    }
+
     /// @dev the backstop must not leave the pool materially under-collateralized. Within a
     /// couple of wei it can, and does: _seizeCollateral removes the scaled deposit with
     /// __toScaledUp while the availability bound is computed in token units, so a seizure
@@ -872,7 +954,9 @@ contract DesultoryTest is Test {
     /// The backstop meets that seam on EVERY call rather than occasionally, because it sets
     /// seizeCap to exactly the availability it just unlocked. So this asserts the bound that
     /// actually matters: the shortfall is dust, not a deficit. The invariant it protects,
-    /// property_borrowIndexOutpacesLiquidityIndex, needs roughly a 10% gap to trip.
+    /// property_borrowIndexOutpacesLiquidityIndex, does NOT need a ~10% gap to trip — ADR
+    /// 0008 inverted the indexes at a zero deficit — but it is held by the two ceilings in
+    /// accrue()'s distribution step, and a shortfall this size is ~1e-12 of the pool.
     function testBackstopLeavesDepositsCoveringDebtWithinRoundingDust() public {
         _saturatedUsdcPool();
         address who = _wethLiquidator();

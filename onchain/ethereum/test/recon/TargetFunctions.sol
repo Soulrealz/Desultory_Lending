@@ -22,6 +22,9 @@ import {MockV3Aggregator} from "../mocks/MockV3Aggregator.sol";
 abstract contract TargetFunctions is BaseTargetFunctions, Properties {
     uint256 internal constant MAX_WARP = 30 days;
 
+    /// @dev matches Desultory's own SECONDS_PER_YEAR; used to re-derive an accrual bound
+    uint256 internal constant SECONDS_PER_YEAR = 365 days;
+
     function _tokenSlot(uint8 seed) private pure returns (uint256) {
         return seed % 2;
     }
@@ -181,6 +184,68 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         ghostDusdBurned += amount;
     }
 
+    /**
+     * @dev pick a position that actually carries DUSD debt, scanning from `seed`; returns 0
+     * when none does.
+     *
+     * Redemption needs FOUR things true at once — a position with DUSD debt, that position
+     * healthy, that position holding the collateral asset named, and the caller holding
+     * DUSD. Drawing each of the four independently from a seed made the conjunction so rare
+     * that the real call fired zero times across hundreds of thousands of generated calls.
+     * Scanning for a candidate is clamping, in the same spirit as _borrowCapacityInToken:
+     * it changes which legal call is made, never which calls are legal. Every precondition
+     * below is still asserted against the chosen position, the health gate included.
+     */
+    function _positionWithDusdDebt(uint8 seed, uint256 preferBelow) internal view returns (uint256) {
+        uint256 n = positionIds.length;
+
+        // first pass: a position the redeemer could OVER-pay, i.e. one owing less than the
+        // redeemer holds. That is the only state in which a legal amount can exceed the
+        // debt, and therefore the only state from which _redeem's clamp-to-debt branch is
+        // reachable at all. It is not a thumb on the scale for that branch: the amount is
+        // still drawn uniformly across the whole balance below, so a partial fill against
+        // the same position is just as likely as an over-payment.
+        for (uint256 i = 0; i < n; i++) {
+            uint256 id = positionIds[(uint256(seed) + i) % n];
+            uint256 owed = desultory.getPositionDusdDebt(id);
+            if (owed > 0 && owed < preferBelow) {
+                return id;
+            }
+        }
+
+        for (uint256 i = 0; i < n; i++) {
+            uint256 id = positionIds[(uint256(seed) + i) % n];
+            if (desultory.getPositionDusdDebt(id) > 0) {
+                return id;
+            }
+        }
+        return 0;
+    }
+
+    /// @dev token slot the position holds collateral in, scanning from `seed`; returns
+    /// tokens.length when it holds neither.
+    function _collateralSlot(uint256 positionId, uint8 seed) internal view returns (uint256) {
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 slot = (uint256(seed) + i) % tokens.length;
+            if (desultory.getPositionCollateralForToken(positionId, tokens[slot]) > 0) {
+                return slot;
+            }
+        }
+        return tokens.length;
+    }
+
+    /// @dev an actor holding DUSD, scanning from `seed`; address(0) when none does.
+    /// DUSD only ever reaches an actor, through desultory_borrowDUSD.
+    function _dusdHolder(uint8 seed) internal view returns (address) {
+        for (uint256 i = 0; i < actors.length; i++) {
+            address who = actors[(uint256(seed) + i) % actors.length];
+            if (dusd.balanceOf(who) > 0) {
+                return who;
+            }
+        }
+        return address(0);
+    }
+
     /// @dev redemption. The redeemer burns DUSD and receives collateral, so the DUSD leg
     /// is a burn (ghostDusdBurned) and the collateral leg is a transfer out (ghostPaidOut).
     ///
@@ -191,16 +256,24 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
     ///
     /// The redeemer is not `liquidator` — liquidator is only ever funded with pool tokens
     /// (see Setup.sol), never DUSD, so a precondition on its DUSD balance would always
-    /// fail and this target would be dead. DUSD only ever reaches a position owner, via
-    /// desultory_borrowDUSD, so the redeemer here is picked the same way
-    /// desultory_repayDUSD picks its payer: a position owner, selected by seed. Redeeming
-    /// against one's own position is legal and deliberately not excluded.
+    /// fail and this target would be dead. DUSD only ever reaches an actor, via
+    /// desultory_borrowDUSD, so the redeemer is an actor that actually holds some
+    /// (_dusdHolder), chosen before the target position so the amount can be bounded
+    /// against a real balance. Redeeming against one's own position is legal and
+    /// deliberately not excluded.
     function desultory_redeem(uint8 redeemerSeed, uint8 positionSeed, uint8 collatSeed, uint256 amount)
         public
         updateGhosts
     {
         precondition(positionIds.length > 0);
-        uint256 positionId = _getPosition(positionSeed);
+
+        address redeemer = _dusdHolder(redeemerSeed);
+        precondition(redeemer != address(0));
+        uint256 balance = dusd.balanceOf(redeemer);
+        precondition(balance > 0);
+
+        uint256 positionId = _positionWithDusdDebt(positionSeed, balance);
+        precondition(positionId != 0);
 
         // only drive the path the engine is specified for; an unhealthy position reverting
         // is correct behaviour, not a finding
@@ -209,16 +282,20 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         uint256 debt = desultory.getPositionDusdDebt(positionId);
         precondition(debt > 0);
 
-        MockERC20 collatToken = _getToken(collatSeed);
+        uint256 slot = _collateralSlot(positionId, collatSeed);
+        precondition(slot < tokens.length);
+        MockERC20 collatToken = MockERC20(tokens[slot]);
         precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
 
-        address redeemer = position.ownerOf(_getPosition(redeemerSeed));
-        uint256 balance = dusd.balanceOf(redeemer);
-        precondition(balance > 0);
+        // Bounded by the redeemer's BALANCE, deliberately not by min(debt, balance). _redeem
+        // clamps dusdAmount down to the position's debt and then re-clamps it down again
+        // from the capped collateral, and a bound that could never exceed the debt left both
+        // of those branches unexecutable. What the burn actually needs is that the FINAL
+        // figure fits the balance, and the final figure is at most min(amount, debt) <=
+        // balance for any amount <= balance — so asking for more than is owed is both legal
+        // (the engine is specified to fill partially rather than revert) and always payable.
+        amount = between(amount, 1, balance);
 
-        amount = between(amount, 1, debt < balance ? debt : balance);
-
-        uint256 slot = _tokenSlot(collatSeed);
         uint256 redeemerCollatBefore = collatToken.balanceOf(redeemer);
         uint256 supplyBefore = dusd.totalSupply();
 
@@ -251,23 +328,28 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         updateGhosts
     {
         precondition(positionIds.length > 0);
-        uint256 positionId = _getPosition(positionSeed);
+
+        address redeemer = _dusdHolder(redeemerSeed);
+        precondition(redeemer != address(0));
+        uint256 balance = dusd.balanceOf(redeemer);
+        precondition(balance > 0);
+
+        uint256 positionId = _positionWithDusdDebt(positionSeed, balance);
+        precondition(positionId != 0);
 
         precondition(desultory.healthFactor(positionId) >= 1e18);
 
         uint256 debt = desultory.getPositionDusdDebt(positionId);
         precondition(debt > 0);
 
-        MockERC20 collatToken = _getToken(collatSeed);
+        uint256 slot = _collateralSlot(positionId, collatSeed);
+        precondition(slot < tokens.length);
+        MockERC20 collatToken = MockERC20(tokens[slot]);
         precondition(desultory.getPositionCollateralForToken(positionId, address(collatToken)) > 0);
 
-        address redeemer = position.ownerOf(_getPosition(redeemerSeed));
-        uint256 balance = dusd.balanceOf(redeemer);
-        precondition(balance > 0);
+        // see desultory_redeem: bounded by balance so the clamp-to-debt branch is reachable
+        amount = between(amount, 1, balance);
 
-        amount = between(amount, 1, debt < balance ? debt : balance);
-
-        uint256 slot = _tokenSlot(collatSeed);
         uint256 redeemerCollatBefore = collatToken.balanceOf(redeemer);
         uint256 supplyBefore = dusd.totalSupply();
 
@@ -405,16 +487,91 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         Desultory.Pool memory pool = desultory.getPoolInfo(address(token));
         precondition(pool.backstopScaledDeposits > 0);
 
-        uint256 committed = pool.backstopScaledDeposits * pool.liquidityIndex / 1e18;
+        uint256 committed = pool.backstopScaledDeposits * pool.liquidityIndex / WAD;
         precondition(committed > 0);
 
+        // The bound has to survive the accrual releaseBackstop performs on its own way in.
+        // getAvailableLiquidity is deposits - debt, and an accrual grows the debt side
+        // faster than the deposit side by the reserve cut every single time, so the figure
+        // read here is an OVER-estimate of what the call will find: bounding against it
+        // reverted Desultory__InsufficientLiquidity on any pool that had accrued since it
+        // was last touched, which is most of them. There is no public single-token accrual
+        // poke to force the state forward first, and adding one to the protocol to suit a
+        // test would be the wrong direction, so bound against a conservative LOWER bound on
+        // post-accrual availability instead.
+        //
+        // accrue() computes factor = rate * dt * WAD / (SECONDS_PER_YEAR * MAX_BPS) and
+        // grows borrowIndex by borrowIndex * factor / WAD, both floored, so the debt figure
+        // rises by at most debt * rate * dt / (SECONDS_PER_YEAR * MAX_BPS); the two wei
+        // cover the round-up on either side of the ceiling division. Deposits can only grow
+        // across an accrual — liquidityIndex never decreases and totalScaledDeposits is
+        // untouched by accrue() — so subtracting that bound from the pre-accrual figure can
+        // only understate what the call will see. `committed` is safe unadjusted for the
+        // same reason: the backstop deposit is valued through liquidityIndex and so is
+        // never worth less after the accrual than it is here.
+        uint256 debt = (pool.totalScaledBorrows * pool.borrowIndex + WAD - 1) / WAD;
+        uint256 dt = block.timestamp - pool.lastUpdate;
+        uint256 rate = desultory.getBorrowRate(address(token), desultory.getUtilization(address(token)));
+        uint256 accrualBound = (debt * rate * dt) / (SECONDS_PER_YEAR * MAX_BPS) + 2;
+
         uint256 available = desultory.getAvailableLiquidity(address(token));
-        precondition(available > 0);
+        precondition(available > accrualBound);
+        available -= accrualBound;
 
         amount = between(amount, 1, committed < available ? committed : available);
 
         vm.prank(desultory.owner());
         desultory.releaseBackstop(address(token), amount);
+    }
+
+    /**
+     * @dev deliberately drive one pool into the short state the backstop exists for.
+     *
+     * Nothing else on this surface reaches it. The backstop only does anything once a
+     * pool's debt has caught up with its deposits — _commitBackstop returns early while
+     * `debt + want <= deposits` — and a pool only gets there by being borrowed almost dry
+     * and then left to accrue, since borrowIndex outruns liquidityIndex by the reserve cut
+     * on every accrual. Random borrows sized anywhere in [1, ceiling] essentially never
+     * stack up to that, which is why redeemWithBackstop's reserve commit, and
+     * releaseBackstop behind it, were dead.
+     *
+     * This is test/Desultory.t.sol's _saturatedUsdcPool in harness form: draw the pool down
+     * to the last thousandth of its available liquidity, then let time run.
+     *
+     * The thousandth left behind is not timidity, it is the point. Drawing to exactly zero
+     * makes reserves and the deposit deficit grow by the same quantity — the reserve cut is
+     * precisely what separates the two sides — so _commitBackstop's `need <= deficit` guard
+     * fires and the commit buys nothing. Leaving a slice means reserves stay ahead of the
+     * deficit by that slice forever after, which is exactly the room a backstopped
+     * redemption fills.
+     */
+    function desultory_saturatePool(uint8 tokenSeed, uint8 positionSeed, uint32 secs) public updateGhosts {
+        precondition(positionIds.length > 0);
+
+        MockERC20 token = _getToken(tokenSeed);
+        uint256 slot = _tokenSlot(tokenSeed);
+        uint256 positionId = _getPosition(positionSeed);
+
+        uint256 liquidity = desultory.getAvailableLiquidity(address(token));
+        precondition(liquidity > 0);
+
+        uint256 capacity = _borrowCapacityInToken(positionId, address(token));
+        precondition(capacity > 0);
+
+        uint256 ceiling = capacity < liquidity ? capacity : liquidity;
+        uint256 drawn = ceiling - ceiling / 1_000;
+        precondition(drawn > 0);
+
+        vm.prank(position.ownerOf(positionId));
+        desultory.borrow(positionId, address(token), drawn);
+        ghostPaidOut[slot] += drawn;
+
+        // and now let the interest run, which is what actually inverts deposits and debt
+        uint256 jump = between(uint256(secs), 1, MAX_WARP);
+        vm.warp(block.timestamp + jump);
+
+        wethFeed.updateAnswer(wethFeed.latestAnswer());
+        usdcFeed.updateAnswer(usdcFeed.latestAnswer());
     }
 
     /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is
@@ -437,9 +594,52 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         ghostPaidOut[slot] += amount;
     }
 
+    /**
+     * @dev the owner closing an asset to new exposure, or reopening it. Owner-only, and it
+     * moves no tokens, so the ghosts must NOT be touched here — same shape as
+     * desultory_releaseBackstop.
+     *
+     * Retirement blocks deposit and borrow only; every unwind path stays open, which is
+     * exactly what makes it safe to fuzz alongside the rest of the surface.
+     *
+     * It must never leave BOTH tokens retired at once. This harness has a fixed two-token
+     * set, so that state makes every deposit and borrow revert permanently and the rest of
+     * the run explores nothing — retiring one therefore reopens the other.
+     */
+    function desultory_setTokenRetired(uint8 tokenSeed, bool retired) public updateGhosts {
+        MockERC20 token = _getToken(tokenSeed);
+        MockERC20 other = _getToken(tokenSeed % 2 == 0 ? 1 : 0);
+
+        vm.prank(desultory.owner());
+        desultory.setTokenRetired(address(token), retired);
+
+        if (retired && desultory.isTokenRetired(address(other))) {
+            vm.prank(desultory.owner());
+            desultory.setTokenRetired(address(other), false);
+        }
+    }
+
+    /**
+     * @dev time passes, and the feeds keep reporting.
+     *
+     * Every price read goes through OracleLib.staleCheckLatestRoundData, whose TIMEOUT is
+     * 3 hours, so a jump of up to MAX_WARP leaves BOTH feeds stale. Without the re-post
+     * below, every target that reads a price — borrow, redeem, liquidate, and every
+     * health-factor precondition — reverts on staleness for the remainder of the sequence
+     * unless the fuzzer happens to draw oracle_setPrice for each of the two tokens before
+     * warping again. That is a harness artifact, not a protocol state worth most of the
+     * call budget: in production the feeds keep publishing while time passes.
+     *
+     * The answers are re-posted UNCHANGED, so this moves no price — oracle_setPrice
+     * remains the only thing that does. test/Desultory.t.sol's _saturatedUsdcPool does
+     * exactly the same thing for exactly the same reason after its 365-day warp.
+     */
     function warp(uint32 secs) public updateGhosts {
         uint256 jump = between(uint256(secs), 1, MAX_WARP);
         vm.warp(block.timestamp + jump);
+
+        wethFeed.updateAnswer(wethFeed.latestAnswer());
+        usdcFeed.updateAnswer(usdcFeed.latestAnswer());
     }
 
     /// @dev price movement is wide on purpose. Every invariant is an

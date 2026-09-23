@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2502b9a
+verified-against: 8847270
 ---
 
 # Liquidations
@@ -48,15 +48,20 @@ charged to the position: the borrower gives up the same seizure either way, so
    much of `collateralAsset`, seizure is capped at `getPositionCollateralForToken`, and
    `repayAmount` is **recomputed downward** from the capped seizure
    (`LiquidationMath.repayFromSeize` + `_debtAmountFromUSD`, the exact inverse of step 4,
-   using the same DUSD-at-par convention), then re-clamped to `debt` in case rounding
-   pushes it back over. Skipping this step and charging the original `repayAmount` for a
-   short delivery would be the same class of bug as defect 1 below (wrong-token payout) —
-   just harder to see, because both sides are still denominated correctly.
+   using the same DUSD-at-par convention), then re-clamped to the same close-factor bound
+   (`maxRepay`, not `debt`) in case rounding pushes it back over. Skipping this step and
+   charging the original `repayAmount` for a short delivery would be the same class of bug
+   as defect 1 below (wrong-token payout) — just harder to see, because both sides are
+   still denominated correctly.
 6. **Bonus split**: `LiquidationMath.splitBonus` divides the seize amount between the
    liquidator and the protocol (`LIQ_PROTOCOL_SHARE`, 30% of the bonus lands in
    `pool.reserves` — or `LIQ_BACKSTOP_SHARE`, 70%, on the backstop path).
 7. **Effects**: `_seizeCollateral` removes the seized collateral and books the protocol
-   cut; `_retireDebt` reduces the position's debt by exactly `repayAmount`.
+   cut; `_retireDebt` retires `repayAmount` of the position's debt, converting it to a
+   scaled figure **down** (and clamping to the scaled debt held) so a repayment never
+   retires more debt than it covers — the pool keeps the remainder, as in `repay()`. On
+   the DUSD branch the arithmetic is `_retireDusdDebt`, shared with `repayDUSD` and the
+   redemption path; only the burn is local.
 8. **Interaction**: `safeTransfer` sends the liquidator's share of seized collateral
    from the contract's own balance — value only ever moves by the liquidator's implicit
    payment (their debt-asset tokens, taken via `_retireDebt`) against protocol-held
@@ -93,9 +98,9 @@ sequenceDiagram
     end
     D->>M: splitBonus(seizeAmount, LIQ_PROTOCOL_SHARE or LIQ_BACKSTOP_SHARE)
     M-->>D: liquidatorShare, protocolCut
-    L->>DUSD: pays repayAmount (burn if DUSD, else transferFrom)
     D->>D: _seizeCollateral (protocolCut -> pool.reserves)
     D->>D: _retireDebt(repayAmount)
+    L->>DUSD: pays repayAmount (burn if DUSD, else transferFrom)
     D->>L: safeTransfer(liquidatorShare)
     opt no collateral left anywhere
         D->>D: _recordBadDebtIfStranded -> totalBadDebtUSD += remaining debt
@@ -279,10 +284,22 @@ etc.) is out of scope for this project.
   second floor in the same direction, bounded by `liquidityIndex / WAD`. Observed in
   testing: a deterministic **2-wei shortfall** against a ~449,740-token pool.
 
-  It is still not worth patching, and nothing it can reach cares.
-  `property_borrowIndexOutpacesLiquidityIndex` needs roughly a 10% deficit, not a couple
-  of wei. `property_utilizationNeverExceeds100` holds because `getUtilization` clamps at
-  `MAX_BPS`. `property_custodyReconciles` is a `gte` whose right-hand side the shortfall
+  It is still not worth patching, and nothing it can reach cares — but the argument for
+  that had to be restated, because the version it used to rest on ("invariant 3 needs
+  roughly a 10% deficit, not a couple of wei") is false as a general claim. ADR 0008
+  inverted the indexes at a **zero** deficit. See "Superseded framings" below.
+
+  Restated against what invariant 3 actually rests on, the seam survives.
+  `accrue()` credits lenders only when `interest > 0`, which requires `borrowIndex` to
+  have moved first; the ceiling cut then withholds at least 1 wei, so the lender side
+  receives at most `interest - 1` spread over a deposit base that ceilings rather than
+  floors. Against a ~449,740-token pool a 2-wei gap is ~4e-12 in relative terms, inside
+  that headroom by twelve orders of magnitude. What the restatement costs is generality:
+  the argument is now explicitly about the gap's size *relative to the pool*, not about
+  2 wei being small in absolute terms, so it does not carry to a dust-scale pool where a
+  couple of wei is the whole base. That regime is held by ADR 0008's two roundings, not
+  by this paragraph. `property_utilizationNeverExceeds100` holds because `getUtilization`
+  clamps at `MAX_BPS`. `property_custodyReconciles` is a `gte` whose right-hand side the shortfall
   moves *down*, so the rounding runs in the property's favour. Accordingly
   `test/Desultory.t.sol:testBackstopLeavesDepositsCoveringDebtWithinRoundingDust` asserts
   the shortfall is dust (≤ 10 wei) rather than zero, and says why. Invisible to every
@@ -304,13 +321,61 @@ etc.) is out of scope for this project.
   reaches `_commitBackstop` against a **healthy** position, so a commit is now cheap and
   permissionless. `_redeem` rejects a redemption that would deliver zero collateral
   (`removed == 0`) before the commit can fire, which closes the free case; a redemption
-  that does deliver still commits against the pool's whole deficit rather than against
-  what it removes.
+  that does deliver still commits against the pool's whole deficit as well as against what
+  it removes. See "Commit sizing" below for why that is forced rather than sloppy.
 
   `releaseBackstop` is safe under the same analysis, and the contrast is worth writing
   down: its `scaledAmount` rounds **up**, so deposits fall by at least `amount` while
   `pool.reserves` rises by exactly `amount`. The property's right-hand side is
   non-increasing across a release.
+
+## Commit sizing
+
+`_commitBackstop(token, want)` commits `deficit + want`, where `deficit` is the pool's own
+shortfall (`debt - deposits`). In a saturated pool the deficit term dominates, so a small
+seizure or redemption can move a large slice of `pool.reserves` into
+`backstopScaledDeposits` — where `releaseBackstop` cannot recover it while the pool stays
+saturated, because its availability gate is exactly the figure that has not moved.
+
+That was once written down as deferred. It is not: it is **forced**. Availability is
+`deposits - debt`, so a commit that does not first clear the deficit unlocks nothing at
+all, and a commit sized on `want` alone would leave the caller with nothing to seize. There
+is no sizing that serves the request and skips the shortfall.
+
+What the sizing does guarantee, and what
+`testBackstopCommitScalesWithTheRequestNotTheReservePot` pins, is that **nothing above the
+deficit is spent except `want` itself**: two runs against an identical pool commit
+different amounts only because their requests differ. The commit tracks the request, not
+the size of the treasury.
+
+Two consequences worth stating plainly:
+
+- Reserves converted this way are not lost. They stay protocol-owned deposits, earning the
+  lender index, recoverable through `releaseBackstop` once the pool is liquid again. The
+  cost is liquidity and timing, not solvency.
+- A commit clamped *below* the deficit can unlock nothing, and `_commitBackstop` now
+  refuses it. This is defence in depth rather than a fix for a live loss: both callers
+  re-read `getAvailableLiquidity`, clamp to it, and revert `Desultory__ZeroAmount` on a
+  zero fill, and that revert already unwound the commit.
+  `testBackstopSpendsNothingWhenReservesCannotCoverTheDeficit` passes with the guard
+  removed, and says so. The guard's value is that the condition lives in the sizing instead
+  of being emergent from two callers' later clamps.
+
+## Superseded framings
+
+Accepted ADRs are never edited, so two of them still carry a justification this note no
+longer accepts. Recorded here rather than by touching them:
+
+- [[0004-liquidation-engine]] describes the wei-scale seizure seam as unreachable by a
+  property "that needs roughly a 10% deficit".
+- [[0006-internal-liquidation-backstop]] repeats the same figure when arguing the
+  widened seam is invisible to `property_borrowIndexOutpacesLiquidityIndex`.
+
+Both are **superseded by [[0008-reserve-cut-rounds-up]]**, whose second reproduction
+inverted the two indexes at `deposits == debt == 3` scaled — a zero deficit — on rounding
+alone. A deficit threshold was never what the property rested on. The conclusions those
+two ADRs reach about the seam still stand; only the reason does. Read the restated
+version under Known limitations above.
 
 ## History: the seven defects of the old engine
 

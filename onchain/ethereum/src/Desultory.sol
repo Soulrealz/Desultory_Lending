@@ -50,6 +50,9 @@ contract Desultory is Ownable, ReentrancyGuard {
     error Desultory__NotLiquidatable(uint256 positionId, uint256 healthFactor);
     error Desultory__NoDebtInAsset(uint256 positionId, address asset);
     error Desultory__NotRedeemable(uint256 positionId, uint256 healthFactor);
+    error Desultory__TokenAlreadyListed(address token);
+    error Desultory__TokenLimitReached();
+    error Desultory__TokenRetired(address token);
 
     ////////////////////////
     // Events
@@ -62,6 +65,8 @@ contract Desultory is Ownable, ReentrancyGuard {
     event Deposit(address indexed user, uint256 indexed position, address indexed token, uint256 amount);
     event AdapterSet(address indexed adapter);
     event DestinationSet(uint32 indexed eid, bool allowed);
+    event TokenAdded(address indexed token, address priceFeed);
+    event TokenRetired(address indexed token, bool retired);
     event DusdStabilityFeeSet(uint16 bps);
     event ReservesWithdrawn(address indexed token, address indexed to, uint256 amount);
     event BackstopCommitted(address indexed token, uint256 amount);
@@ -167,6 +172,22 @@ contract Desultory is Ownable, ReentrancyGuard {
     mapping(uint256 tokenId => address token) private __tokenList;
     uint256 private __supportedTokensCount;
 
+    /**
+     * @dev tokens closed to NEW exposure. Deliberately a side mapping rather than a field
+     * on Collateral: the struct is what getTokenInfo returns, and widening it would churn
+     * an ABI that callers and tests already depend on.
+     *
+     * Retirement never removes a token from __tokenList and never clears __tokenInfos.
+     * weightedCollateralUSD, userBorrowedAmountUSD, userMaxBorrowValueUSD and _accrueAll
+     * all walk __tokenList[0 .. __supportedTokensCount); shrinking that list, or blanking
+     * a price feed, would make an existing position's collateral AND debt in the asset
+     * vanish from every health computation at once. Debt disappearing makes an insolvent
+     * position look healthy; collateral disappearing makes a healthy one instantly
+     * liquidatable. So this is a flag on new exposure only — existing positions unwind
+     * through repay, withdraw, liquidate and redeem exactly as before.
+     */
+    mapping(address token => bool retired) private __retiredTokens;
+
     // Contract Variables
     Position private __positionContract;
     DUSD private __DUSD;
@@ -203,6 +224,11 @@ contract Desultory is Ownable, ReentrancyGuard {
     uint16 private constant RESERVE_FACTOR = 1_000; // 10% of borrow interest to the protocol
     uint16 private constant REDEMPTION_FEE_BPS = 50; // 0.5% — the redemption activation threshold
     uint256 private constant WAD = 1e18;
+    // every health check is O(supported tokens), so an unbounded list is a gas-griefing
+    // vector: past some length liquidation stops being profitable, and past another it
+    // stops fitting in a block at all. Enforced by _listToken, so the constructor and
+    // addToken are bounded by the same number.
+    uint256 private constant MAX_SUPPORTED_TOKENS = 32;
     uint256 private constant SECONDS_PER_YEAR = 365 days;
 
     ////////////////////////
@@ -219,6 +245,15 @@ contract Desultory is Ownable, ReentrancyGuard {
     modifier isAllowedToken(address token) {
         if (__tokenInfos[token].priceFeed == address(0)) {
             revert Desultory__TokenNotWhitelisted(token);
+        }
+        _;
+    }
+
+    /// @dev blocks NEW exposure to a retired asset. Never applied to an unwind path —
+    /// see __retiredTokens.
+    modifier notRetired(address token) {
+        if (__retiredTokens[token]) {
+            revert Desultory__TokenRetired(token);
         }
         _;
     }
@@ -241,39 +276,9 @@ contract Desultory is Ownable, ReentrancyGuard {
         Ownable(msg.sender)
     {
         for (uint256 i = 0; i < configs.length; i++) {
-            TokenConfig memory c = configs[i];
-
-            // a threshold at or below the LTV leaves no buffer band: the position would
-            // become liquidatable at the exact instant it reached maximum borrow.
-            if (
-                c.liquidationThreshold <= c.ltvRatio || c.liquidationThreshold > 100
-                    || c.liquidationBonusBps > MAX_BONUS_BPS
-            ) {
-                revert Desultory__InvalidRiskParams(c.token);
-            }
-
-            __tokenInfos[c.token] = Collateral(
-                c.priceFeed,
-                c.feedDecimals,
-                c.tokenDecimals,
-                c.ltvRatio,
-                c.liquidationThreshold,
-                c.liquidationBonusBps,
-                c.borrowRate
-            );
-            __tokenList[i] = c.token;
-            __pools[c.token] = Pool({
-                liquidityIndex: WAD,
-                borrowIndex: WAD,
-                totalScaledDeposits: 0,
-                backstopScaledDeposits: 0,
-                totalScaledBorrows: 0,
-                reserves: 0,
-                lastUpdate: uint40(block.timestamp)
-            });
+            _listToken(configs[i]);
         }
 
-        __supportedTokensCount = configs.length;
         dusdBorrowIndex = WAD;
         __dusdLastUpdate = uint40(block.timestamp);
         dusdStabilityFeeBps = 200; // 2% annual default
@@ -295,6 +300,95 @@ contract Desultory is Ownable, ReentrancyGuard {
     ////////////////////////
     // Admin Functions
     ////////////////////////
+
+    /**
+     * @dev the single writer of the supported-asset set, shared by the constructor and
+     * addToken so a token listed after deployment is validated exactly like one listed at
+     * it. The liquidationThreshold <= 100 bound in particular is load-bearing for the
+     * safety arguments in ADR 0007 and ADR 0008, both of which quantify over EVERY listed
+     * token — a second, laxer validation path for addToken would quietly void them.
+     *
+     * The caller is responsible for the identity checks that only make sense post-
+     * deployment (zero address, duplicate listing, DUSD); __DUSD is not yet assigned while
+     * the constructor runs, so those cannot live here.
+     */
+    function _listToken(TokenConfig memory c) private {
+        if (__supportedTokensCount >= MAX_SUPPORTED_TOKENS) {
+            revert Desultory__TokenLimitReached();
+        }
+
+        // a threshold at or below the LTV leaves no buffer band: the position would
+        // become liquidatable at the exact instant it reached maximum borrow.
+        if (
+            c.liquidationThreshold <= c.ltvRatio || c.liquidationThreshold > 100
+                || c.liquidationBonusBps > MAX_BONUS_BPS
+        ) {
+            revert Desultory__InvalidRiskParams(c.token);
+        }
+
+        __tokenInfos[c.token] = Collateral(
+            c.priceFeed,
+            c.feedDecimals,
+            c.tokenDecimals,
+            c.ltvRatio,
+            c.liquidationThreshold,
+            c.liquidationBonusBps,
+            c.borrowRate
+        );
+        __tokenList[__supportedTokensCount] = c.token;
+        __supportedTokensCount++;
+
+        // lastUpdate is set to NOW rather than left at zero: a fresh pool carrying a stale
+        // timestamp would charge its first borrower interest for every second since
+        // deployment on the very first accrue().
+        __pools[c.token] = Pool({
+            liquidityIndex: WAD,
+            borrowIndex: WAD,
+            totalScaledDeposits: 0,
+            backstopScaledDeposits: 0,
+            totalScaledBorrows: 0,
+            reserves: 0,
+            lastUpdate: uint40(block.timestamp)
+        });
+    }
+
+    /**
+     * @dev list a new collateral/borrow asset. Append-only: the index a token occupies in
+     * __tokenList is never reused, so no existing position's accounting moves under it.
+     */
+    function addToken(TokenConfig calldata c) external onlyOwner {
+        if (__tokenInfos[c.token].priceFeed != address(0)) {
+            revert Desultory__TokenAlreadyListed(c.token);
+        }
+        if (c.token == address(0) || c.priceFeed == address(0)) {
+            revert Desultory__InvalidRiskParams(c.token);
+        }
+        // DUSD is debt-only: it is minted, never deposited, and its debt lives in
+        // __scaledDusdDebt with its own index. Listing it would give it a second, parallel
+        // accounting path through __pools that userBorrowedAmountUSD would then count
+        // alongside the DUSD leg it already adds at par.
+        if (c.token == address(__DUSD)) {
+            revert Desultory__InvalidRiskParams(c.token);
+        }
+
+        _listToken(c);
+        emit TokenAdded(c.token, c.priceFeed);
+    }
+
+    /**
+     * @dev close an asset to new exposure, or reopen it.
+     *
+     * This is the de-listing half, and it is deliberately NOT a removal. See
+     * __retiredTokens for why the list can never shrink.
+     *
+     * Reversible in both directions on purpose: the likeliest reason to retire an asset is
+     * a temporarily untrustworthy oracle, and a one-way switch would turn every such
+     * precaution into a permanent de-listing with nothing gained.
+     */
+    function setTokenRetired(address token, bool retired) external onlyOwner isAllowedToken(token) {
+        __retiredTokens[token] = retired;
+        emit TokenRetired(token, retired);
+    }
 
     /// @dev the cross-chain Adapter permitted to be paid for mint authorizations
     function setAdapter(address _adapter) external onlyOwner {
@@ -437,6 +531,7 @@ contract Desultory is Ownable, ReentrancyGuard {
         external
         moreThanZero(amount)
         isAllowedToken(token)
+        notRetired(token)
     {
         accrue(token);
 
@@ -518,6 +613,7 @@ contract Desultory is Ownable, ReentrancyGuard {
         external
         moreThanZero(amount)
         isAllowedToken(token)
+        notRetired(token)
         onlyPositionOwner(positionId)
     {
         accrue(token);
@@ -792,8 +888,33 @@ contract Desultory is Ownable, ReentrancyGuard {
         }
         need -= deposits;
 
+        // What the commit has to buy is `want` of AVAILABILITY, and availability is
+        // deposits - debt. So in a saturated pool the deficit term is not padding that
+        // could be trimmed: without clearing it first, nothing added is reachable by the
+        // caller. `need` is therefore deficit + want and never more, which is the
+        // proportionality that does hold — a small request does not scale with reserves.
+        uint256 deficit = debt > deposits ? debt - deposits : 0;
+
         if (need > pool.reserves) {
             need = pool.reserves;
+        }
+
+        // ...but a commit CLAMPED below the deficit buys nothing: availability afterwards is
+        // `need - deficit`, so when reserves cannot cover the deficit the caller still has
+        // zero to seize. Refuse it rather than converting reserves into
+        // backstopScaledDeposits that unlocked nothing.
+        //
+        // Defence in depth, deliberately, NOT a bug fix — and worth being precise about,
+        // because the obvious claim here is wrong. Without this branch the commit is not a
+        // persisted loss: both callers re-read getAvailableLiquidity afterwards, clamp to
+        // it, and revert Desultory__ZeroAmount on a zero fill, and that revert unwinds the
+        // commit along with everything else. The branch is worth keeping anyway, because it
+        // makes the reachability condition local to the sizing rather than an emergent
+        // property of two callers' later clamps, but it removes no loss that survives the
+        // transaction. testBackstopSpendsNothingWhenReservesCannotCoverTheDeficit passes
+        // with or without it, for exactly that reason.
+        if (need <= deficit) {
+            return;
         }
 
         // the scaled credit rounds DOWN, the same direction deposit() uses: the protocol
@@ -821,9 +942,15 @@ contract Desultory is Ownable, ReentrancyGuard {
         // second caller and it is gated on healthFactor >= WAD, so a commit is cheap and
         // permissionless: any redeemer can fire one against any healthy position. What
         // stops a zero-value call from triggering one is _redeem's `removed == 0` guard,
-        // which runs before this function is reached. A larger dusdAmount still triggers a
-        // full-deficit commit sized on the pool's own shortfall rather than on `want`;
-        // that shape is deliberate and out of scope here. The seam remains a documented
+        // which runs before this function is reached. A larger dusdAmount still converts
+        // deficit + want of reserves, dominated by the deficit in a saturated pool, and
+        // that is now understood rather than merely deferred: it is forced. Availability IS
+        // deposits - debt, so the shortfall has to be cleared before any part of `want`
+        // becomes reachable, and a commit sized on `want` alone would unlock nothing. What
+        // the sizing does guarantee is that nothing above the deficit is spent except
+        // `want` itself. The residual cost is that a small request can move a large slice
+        // of reserves into backstopScaledDeposits, recoverable only through
+        // releaseBackstop once the pool is liquid again. The seam remains a documented
         // rounding seam rather than a solvency concern. See docs/Protocol/Liquidations.md.
         //
         // releaseBackstop is safe under the same analysis: its scaledAmount rounds UP, so
@@ -950,11 +1077,11 @@ contract Desultory is Ownable, ReentrancyGuard {
     /**
      * @dev retire `amount` of a position's DUSD debt.
      *
-     * Shared by repayDUSD and the redemption path so both reduce debt through identical
-     * arithmetic. It is not the only copy: _retireDebt's DUSD branch carries a third,
-     * verbatim inline duplicate, used by liquidate() when debtAsset == DUSD. The three
-     * agree today, and property_dusdDebtReconciles depends on them continuing to — a
-     * change here has to be mirrored there.
+     * The single place a position's DUSD debt is reduced. Three callers: repayDUSD, the
+     * redemption path, and _retireDebt's DUSD branch (liquidate() with
+     * debtAsset == DUSD), which used to carry a verbatim inline copy of these five lines.
+     * property_dusdDebtReconciles depends on all DUSD retirement sharing one arithmetic,
+     * so keep it that way rather than inlining a fourth.
      *
      * The scaled reduction rounds DOWN, so the position is credited with no more relief
      * than the payment warrants. Same direction repayDUSD used before this extraction.
@@ -1168,15 +1295,11 @@ contract Desultory is Ownable, ReentrancyGuard {
      */
     function _retireDebt(uint256 positionId, address asset, uint256 amount) private {
         if (asset == address(__DUSD)) {
-            // this branch is an inline copy of _retireDusdDebt, which repayDUSD and the
-            // redemption path share. Keep the two in step — property_dusdDebtReconciles
-            // assumes every DUSD retirement uses this same arithmetic.
-            uint256 scaled = __toScaledDown(amount, dusdBorrowIndex);
-            if (scaled > __scaledDusdDebt[positionId]) {
-                scaled = __scaledDusdDebt[positionId];
-            }
-            __scaledDusdDebt[positionId] -= scaled;
-            totalScaledDusdDebt -= scaled;
+            // the arithmetic lives in _retireDusdDebt, shared with repayDUSD and the
+            // redemption path — property_dusdDebtReconciles assumes every DUSD
+            // retirement goes through it. Only the settlement differs: a burn here and
+            // in repayDUSD, nothing in redemption, which burns at its own entry point.
+            _retireDusdDebt(positionId, amount);
 
             __DUSD.burn(msg.sender, amount);
         } else {
@@ -1449,6 +1572,10 @@ contract Desultory is Ownable, ReentrancyGuard {
 
     function getPriceFeedForToken(address token) public view returns (address) {
         return __tokenInfos[token].priceFeed;
+    }
+
+    function isTokenRetired(address token) external view returns (bool) {
+        return __retiredTokens[token];
     }
 
     function getTokenInfo(address token) external view returns (Collateral memory) {

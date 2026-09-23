@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 7d9de79
+verified-against: edaa61a
 ---
 
 # Cross-Chain
@@ -114,10 +114,12 @@ ever appearing encumbered.
 
 ### The $1 valuation gap
 
-DUSD debt is added to `userBorrowedAmountUSD` **at par**. This is an assumption, not a
-fact. It holds only while the peg holds, and the peg mechanism is not designed yet
-(project C2). If DUSD trades above $1, debt is understated here and positions are
-under-collateralized in real terms. This is a known, documented hole, not an oversight.
+DUSD debt is added to `userBorrowedAmountUSD` **at par**. Redemption now backs that
+convention from below: `redeem` / `redeemWithBackstop` convert a unit of DUSD into $1 of
+collateral less `REDEMPTION_FEE_BPS`, so below $0.995 arbitrage burns supply until the
+discount closes. See [[DUSD]]. The gap that remains is one-sided — nothing caps DUSD
+**above** $1, the direction that understates debt here and leaves positions
+under-collateralized in real terms, and supply caps (project C2.2) are not built.
 
 ## Configuration surface
 
