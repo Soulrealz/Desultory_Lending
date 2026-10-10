@@ -150,6 +150,35 @@ contract DusdDebtCeilingTest is Test {
         assertLe(desultory.getTotalDusdDebt(), 5_000e18, "a successful borrow never leaves debt above the ceiling");
     }
 
+    /// @dev "early, never late", off WAD: borrows straddling the headroom either revert with
+    /// the ceiling error or leave debt at or under it. Fuzzing the starting debt and the age
+    /// of the index varies the rounding residues, which a single fixed point cannot.
+    function testFuzzCeilingNeverBindsLate(uint256 initial, uint256 warp, uint256 room, uint256 k) public {
+        initial = bound(initial, 1e18, 5_000e18);
+        warp = bound(warp, 1 days, 2 * 365 days);
+        room = bound(room, 4, 1_000e18); // the smallest straddle, room - 3, must still be a positive borrow
+        k = bound(k, 0, 6);
+
+        vm.prank(alice);
+        desultory.deposit(0, weth, 10e18);
+        vm.prank(alice);
+        desultory.borrowDUSD(1, initial);
+
+        vm.warp(block.timestamp + warp);
+        _refreshFeeds();
+        desultory.accrueDusd();
+
+        uint256 ceiling = desultory.getTotalDusdDebt() + room;
+        _setCeiling(ceiling);
+
+        vm.prank(alice);
+        try desultory.borrowDUSD(1, room - 3 + k) {
+            assertLe(desultory.getTotalDusdDebt(), ceiling, "a successful borrow left debt above the ceiling");
+        } catch (bytes memory err) {
+            assertEq(bytes4(err), Desultory.Desultory__DusdDebtCeilingExceeded.selector, "only the ceiling may reject");
+        }
+    }
+
     ///////////////////////
     // both entry points
     ///////////////////////
