@@ -130,7 +130,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   deliberately **unchanged** by the redemption work: redemption is what now *enforces* it,
   since below $0.995 buying DUSD and redeeming it is profitable and burns supply until the
   discount closes. Only its comment changed. It is a floor, not a band — nothing caps DUSD
-  above $1, and supply caps (C2.2) are not built. See `docs/Protocol/DUSD.md`.
+  above $1, and the debt ceiling does not: binding, it pushes DUSD up. See
+  `docs/Protocol/DUSD.md`.
 - Two distinct collateral-weighted views, deliberately separate: `userMaxBorrowValueUSD`
   (LTV-weighted — "may this borrow more?", checked directly by `borrow`/`withdraw`) and
   `weightedCollateralUSD` (liquidation-threshold-weighted — "may this be seized?", feeds
@@ -143,7 +144,13 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   between its LTV cap and its liquidation threshold is deliberately still transferable.
 - `Ownable` (added with the cross-chain work; previously there was no access control at
   all). Owner-only: `setAdapter`, `setAllowedDestination(eid, bool)`,
-  `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS).
+  `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS),
+  `setDusdDebtCeiling(ceiling)` — the DUSD debt ceiling (ADR 0010): a bound on this home
+  chain's total DUSD debt including accrued fee, checked in `_borrowDusd` on the post-borrow
+  total before the health check, fail-closed at a zero storage default (`Deploy.s.sol` sets
+  it from `Config.s.sol`). It sits on the only site that adds DUSD debt, so it never blocks
+  repay, redeem or liquidate. A risk limit, not a peg tool. `getTotalDusdDebt()` exposes
+  the figure it checks.
 - `withdrawReserves(token, to, amount)` (owner-only) pays out a pool's accumulated revenue —
   the RESERVE_FACTOR interest cut plus LIQ_PROTOCOL_SHARE of liquidation bonuses. It accrues
   first and needs no liquidity gate: the balance and `pool.reserves` fall by the same amount,
@@ -255,6 +262,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   charges no interest for time before it was listed, and the load-bearing one — a retired
   asset's position reports a bit-identical health factor and still repays, withdraws and
   liquidates.
+- `DusdDebtCeiling.t.sol` — 15 tests for the DUSD debt ceiling: fail-closed default, the
+  boundary at WAD and after accrual, both borrow entry points, debt above the ceiling, and
+  that repay/redeem/liquidate all still work at a zero ceiling.
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
 - `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
@@ -295,6 +305,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   a pool short on purpose, and `desultory_releaseBackstop`'s bound was re-derived to survive
   the accrual the call itself performs. Measurements and the before/after counters are in
   `docs/Audit/Invariants.md`; read that before trusting any campaign count.
+  The DUSD debt ceiling is asserted in-target in `desultory_borrowDUSD` (a successful
+  borrow never leaves debt above it), and `desultory_setDusdDebtCeiling` moves it around
+  current debt.
   `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
   **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding

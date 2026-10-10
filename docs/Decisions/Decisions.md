@@ -25,3 +25,4 @@ which is what [[Protocol]] is for.
 - [[0007-dusd-redemption]] — DUSD is redeemable for collateral at par less a flat fee, against healthy positions only
 - [[0008-reserve-cut-rounds-up]] — the reserve cut ceilings, so dust pools cannot invert the indexes
 - [[0009-token-listing-admin]] — tokens are appended and retired, never removed from the list
+- [[0010-dusd-debt-ceiling]] — DUSD issuance is bounded by an owner-set, fail-closed debt ceiling per home chain

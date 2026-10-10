@@ -46,20 +46,20 @@ NFTs; collateral and debt live on one home chain; only DUSD crosses chains.
 | — | Dust-scale accrual rounding in `accrue()` | done — ADR 0008 |
 | — | Token add/remove admin | done — ADR 0009 |
 | — | Harness reachability (stale feeds, clamps, release bound) | done |
-| C2.2 | DUSD supply caps | not started |
+| C2.2 | DUSD supply caps (debt ceiling per home chain) | done — ADR 0010 |
 | C2.3 | The `dusdReserves` outlet | not started |
 | D2.3 | External liquidation backstop (flash loan) | not started |
 | D3 | ElizaOS automation | not started |
 | — | Governance | not started |
 
-**Baseline, verified at `810fbeb`:**
+**Baseline, verified at `fe098d4`:**
 
 | Gate | Command (from `onchain/ethereum/`) | Result |
 |---|---|---|
-| Unit tests | `PRIVATE_KEY=0xac09... forge test` | **141 passing**, 10 suites, 0 failed |
-| Medusa | `medusa fuzz --test-limit 50000` | **28 passed, 0 failed** |
-| Echidna | `echidna . --contract CryticTester --config echidna.yaml --test-limit 30000` | **29 passing, 0 failed** |
-| Size | `forge build --sizes` | `Desultory` **20,244** of 24,576 |
+| Unit tests | `PRIVATE_KEY=0xac09... forge test` | **157 passing**, 11 suites, 0 failed |
+| Medusa | `medusa fuzz --test-limit 50000` | **29 passed, 0 failed** |
+| Echidna | `echidna . --contract CryticTester --config echidna.yaml --test-limit 30000` | **30 passing, 0 failed** |
+| Size | `forge build --sizes` | `Desultory` **20,523** of 24,576 |
 
 Nothing is red. Treat a green fuzz run as "not found at this limit" rather than "proved" —
 and note that the old counts above meant even less than that: `warp` was leaving both price
@@ -112,15 +112,12 @@ Stop here and ask before starting any of these. Each one is a design with real t
 and the project's convention is `superpowers:brainstorming` → spec → `writing-plans` → build.
 These keep their original numbers; there are no self-contained tasks left above them.
 
-## 9. C2.2 — DUSD supply caps
+## 9. C2.2 — done (ADR 0010)
 
-A global ceiling on DUSD minting, enforced **send-side only**. ADR 0003 forbids any check in
-`Adapter._lzReceive` permanently — the debt is already recorded on the source chain by the
-time it runs, so a revert there strands a borrower owing DUSD they never received. Every
-safety check belongs where reverting is free.
-
-Open questions: global cap or per-position, who sets it, how it interacts with the peg now
-that redemption exists.
+Built as a fail-closed debt ceiling per home chain, enforced in `_borrowDusd`. Two findings
+from the design worth carrying forward: a supply cap is a **risk limit, not a peg tool** —
+binding, it pushes DUSD above par — and a truly global cap is impossible send-side, because
+no chain can see global supply. Read ADR 0010 before touching it.
 
 ## 10. C2.3 — the `dusdReserves` outlet
 

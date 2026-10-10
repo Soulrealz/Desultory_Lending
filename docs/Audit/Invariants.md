@@ -140,7 +140,7 @@ the class of slip where a commit or a release moves one line and not the other â
 invariant 1 would also catch, but only while every position in the harness is enumerable;
 this one holds regardless.
 
-## The one assertion that is not a property
+## Assertions that are not properties
 
 Redemption is asserted **inside its target functions**, not as a `property_`:
 
@@ -167,6 +167,27 @@ redemption that took the right collateral and retired too little debt would sati
 That class is covered by `testRedeemImprovesTheTargetHealthFactor` in
 `test/Desultory.t.sol` as a unit test, where no time passes between the snapshot and the
 call, and by nothing in the fuzzer.
+
+### The debt ceiling
+
+`desultory_borrowDUSD` asserts, after every **successful** borrow:
+
+> `getTotalDusdDebt() <= dusdDebtCeiling()`
+
+It cannot be a `property_`: accrual alone, or the owner lowering the ceiling, legitimately
+leaves debt above it. ADR 0010's guarantee is about what a *borrow* may do, so it is
+asserted where a borrow happens.
+
+The borrow target bounds its amount by both health headroom and ceiling headroom, with the
+top fifth of the ceiling range deliberately overshooting so rejections are exercised.
+`desultory_setDusdDebtCeiling` moves the ceiling within `[debt / 2, 2 * debt + 1,000 DUSD]`
+â€” around current debt, never parked at zero, which would silently shut DUSD borrowing and
+redemption coverage for the rest of a sequence.
+
+Reachability, by temporary counters (removed before commit), Medusa at a 500,000 test
+limit: a borrow rejected by the ceiling first fired within 29,032 calls; a borrow succeeding
+with under 1% of the ceiling as headroom first fired within 23,890 calls. (Upper bounds:
+Medusa's call counter is sampled every few seconds and freezes while workers shrink.)
 
 ### The stale-feed hole: most of the harness was dead
 
