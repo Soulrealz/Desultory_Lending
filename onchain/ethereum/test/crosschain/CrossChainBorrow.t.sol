@@ -97,6 +97,7 @@ contract CrossChainBorrowTest is TestHelperOz5 {
         adapterA.setDesultory(address(desultoryA));
         desultoryA.setAdapter(address(adapterA));
         desultoryA.setAllowedDestination(B_EID, true);
+        desultoryA.setDusdDebtCeiling(10_000_000e18);
 
         options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200000, 0);
 
@@ -182,5 +183,23 @@ contract CrossChainBorrowTest is TestHelperOz5 {
         vm.prank(alice);
         desultoryA.repayDUSD(1, 1_000e18);
         assertEq(desultoryA.getPositionDusdDebt(1), 0);
+    }
+
+    /// @dev the ceiling governs NEW borrows. A mint already authorized and in flight when the
+    /// owner closes the ceiling must still land: the debt was recorded before the ceiling
+    /// moved, and ADR 0003 keeps the receive path unconditional.
+    function test_inFlightMintLandsAfterCeilingCloses() public {
+        vm.prank(alice);
+        desultoryA.deposit(0, address(wethA), 10e18);
+
+        MessagingFee memory fee = adapterA.quoteMint(B_EID, alice, 1_000e18, options);
+        vm.deal(alice, 10 ether);
+        vm.prank(alice);
+        desultoryA.borrowDUSDTo{value: fee.nativeFee}(1, B_EID, alice, 1_000e18, options);
+
+        desultoryA.setDusdDebtCeiling(0);
+
+        verifyPackets(B_EID, addressToBytes32(address(adapterB)));
+        assertEq(dusdB.balanceOf(alice), 1_000e18, "the in-flight mint must land regardless");
     }
 }

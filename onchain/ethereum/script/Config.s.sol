@@ -23,6 +23,10 @@ contract Config is Script
     address public lz;
     uint32 public eid;
 
+    // DUSD debt ceiling for this home chain (ADR 0010). Per-chain configuration, like the
+    // feeds and the endpoint. There is no mainnet branch yet; choose a real figure there.
+    uint256 public dusdDebtCeiling;
+
     Feeds public feeds;
     Tokens public tokens;
 
@@ -33,10 +37,12 @@ contract Config is Script
             (feeds, tokens) = getSepoliaConfig();
             lz = 0x6EDCE65403992e310A62460808c4b910D972f10f;
             eid = 40161;
+            dusdDebtCeiling = 10_000_000e18;
         } 
         else 
         {
             (feeds, tokens, lz, eid) = getOrCreateAnvilEthConfig();
+            dusdDebtCeiling = 10_000_000e18;
         }
     }
 

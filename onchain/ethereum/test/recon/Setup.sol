@@ -85,6 +85,10 @@ abstract contract Setup is BaseSetup {
         // without this every DUSD borrow reverts and the DUSD targets do nothing
         dusd.setMinter(address(desultory), true);
 
+        // the debt ceiling is fail-closed (zero) until set — same value Deploy.s.sol uses.
+        // desultory_setDusdDebtCeiling moves it around current debt from here.
+        desultory.setDusdDebtCeiling(10_000_000e18);
+
         // Order matters: setProtocol must run while the deployer still owns the
         // NFT contract. Reversed, the health gate is permanently disabled.
         position.setProtocol(address(desultory));
