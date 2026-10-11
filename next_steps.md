@@ -52,11 +52,11 @@ NFTs; collateral and debt live on one home chain; only DUSD crosses chains.
 | D3 | ElizaOS automation | not started |
 | — | Governance | not started |
 
-**Baseline, verified at `fe098d4`:**
+**Baseline, verified at `1a5bcb5`:**
 
 | Gate | Command (from `onchain/ethereum/`) | Result |
 |---|---|---|
-| Unit tests | `PRIVATE_KEY=0xac09... forge test` | **157 passing**, 11 suites, 0 failed |
+| Unit tests | `PRIVATE_KEY=0xac09... forge test` | **158 passing**, 11 suites, 0 failed |
 | Medusa | `medusa fuzz --test-limit 50000` | **29 passed, 0 failed** |
 | Echidna | `echidna . --contract CryticTester --config echidna.yaml --test-limit 30000` | **30 passing, 0 failed** |
 | Size | `forge build --sizes` | `Desultory` **20,523** of 24,576 |

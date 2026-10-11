@@ -262,9 +262,10 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   charges no interest for time before it was listed, and the load-bearing one — a retired
   asset's position reports a bit-identical health factor and still repays, withdraws and
   liquidates.
-- `DusdDebtCeiling.t.sol` — 15 tests for the DUSD debt ceiling: fail-closed default, the
-  boundary at WAD and after accrual, both borrow entry points, debt above the ceiling, and
-  that repay/redeem/liquidate all still work at a zero ceiling.
+- `DusdDebtCeiling.t.sol` — 16 tests for the DUSD debt ceiling: fail-closed default, the
+  boundary at WAD and after accrual, a fuzz test that it never binds late, both borrow
+  entry points, debt above the ceiling, and that repay/redeem/liquidate all still work at a
+  zero ceiling.
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
 - `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
