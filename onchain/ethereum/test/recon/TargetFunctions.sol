@@ -595,28 +595,33 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         usdcFeed.updateAnswer(usdcFeed.latestAnswer());
     }
 
-    /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is
-    /// pranked as the deployer; the ghosts must see it or property_tokenConservation
-    /// breaks the first time the fuzzer calls it.
     /**
      * @dev the owner moving the DUSD debt ceiling. Owner-only and it moves no tokens, so the
      * ghosts are not touched.
      *
-     * Drawn from [debt / 2, 2 * debt + CEILING_FLOOR], deliberately NOT from [0, anything]:
-     * it should land around current debt, sometimes binding and sometimes not. A target able
-     * to set zero and leave it there would shut DUSD borrowing for the rest of the sequence
-     * and silently take redemption coverage with it — the same failure as the stale-feed warp
-     * fixed in 810fbeb. The lower half of the range sits below current debt, which is a
-     * legitimate state the unwind paths must keep working through.
+     * Half the draws land in [debt / 2, 2 * debt + CEILING_FLOOR] — around current debt,
+     * sometimes binding and sometimes not. The bottom of that range sits below current debt, a
+     * legitimate state the unwind paths must keep working through. At zero debt that range
+     * starts at zero, so the ceiling can briefly close entirely.
+     *
+     * The other half reopen it to OPEN_DUSD_CEILING. Without that, one call at low debt would
+     * pin the ceiling near 1,000 DUSD and every later draw would stay near it, shutting
+     * DUSD-heavy positions — and the liquidation and redemption states they drive — out of
+     * the rest of the sequence: the same silent failure as the stale-feed warp fixed in 810fbeb.
      */
-    function desultory_setDusdDebtCeiling(uint256 seed) public updateGhosts {
+    function desultory_setDusdDebtCeiling(uint8 mode, uint256 seed) public updateGhosts {
         uint256 debt = desultory.getTotalDusdDebt();
-        uint256 ceiling = between(seed, debt / 2, 2 * debt + CEILING_FLOOR);
+        // the reopen choice gets its own argument: keyed off `seed`, every multiple of 1e18
+        // in the fuzzers' value dictionaries would pick it and the ceiling would rarely bind
+        uint256 ceiling = mode % 2 == 0 ? OPEN_DUSD_CEILING : between(seed, debt / 2, 2 * debt + CEILING_FLOOR);
 
         vm.prank(desultory.owner());
         desultory.setDusdDebtCeiling(ceiling);
     }
 
+    /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is
+    /// pranked as the deployer; the ghosts must see it or property_tokenConservation
+    /// breaks the first time the fuzzer calls it.
     function desultory_withdrawReserves(uint8 tokenSeed, uint256 amount) public updateGhosts {
         MockERC20 token = _getToken(tokenSeed);
         uint256 slot = _tokenSlot(tokenSeed);

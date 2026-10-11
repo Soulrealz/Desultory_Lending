@@ -180,14 +180,35 @@ asserted where a borrow happens.
 
 The borrow target bounds its amount by both health headroom and ceiling headroom, with the
 top fifth of the ceiling range deliberately overshooting so rejections are exercised.
-`desultory_setDusdDebtCeiling` moves the ceiling within `[debt / 2, 2 * debt + 1,000 DUSD]`
-— around current debt, never parked at zero, which would silently shut DUSD borrowing and
-redemption coverage for the rest of a sequence.
 
-Reachability, by temporary counters (removed before commit), Medusa at a 500,000 test
-limit: a borrow rejected by the ceiling first fired within 29,032 calls; a borrow succeeding
-with under 1% of the ceiling as headroom first fired within 23,890 calls. (Upper bounds:
-Medusa's call counter is sampled every few seconds and freezes while workers shrink.)
+**The harness ceiling starts open**, at `type(uint128).max` — the one parameter where
+`Setup.sol` deliberately differs from `Deploy.s.sol`. Actors hold a million of each token,
+billions of USD of borrow capacity, so the deploy's 10M ceiling capped every DUSD borrow
+long before a large position neared its health edge. With the ceiling open the borrow bound
+reduces exactly to the pre-ceiling `between(amount, 1, healthRoom)`.
+`desultory_setDusdDebtCeiling` then moves it: half its calls draw from
+`[debt / 2, 2 * debt + 1,000 DUSD]`, around current debt (at zero debt that range starts at
+zero, so the ceiling can briefly close); the other half reopen it. The reopen choice is a
+separate `uint8` argument — keyed off the value seed, every multiple of `1e18` in the
+fuzzers' dictionaries picked it. Without a reopen, one call at low debt pinned the ceiling
+near 1,000 DUSD for the rest of the sequence, the same silent narrowing as the stale-feed
+warp below.
+
+Reachability, by temporary counters (removed before commit), Medusa at a 500,000 test limit
+**from an empty corpus**: a borrow rejected by the ceiling fired inside the first progress
+interval (about three seconds); a borrow succeeding with at most 1% of the ceiling as
+headroom fired within 18,175 calls. Both figures are upper bounds — the call counter is
+sampled every few seconds and freezes while workers shrink.
+
+**Read campaign figures with the corpus in mind.** `medusa.json` and `echidna.yaml` persist
+their corpora (`medusa-corpus/`, `echidna-corpus/`), and a warm corpus replays earlier
+sequences: one warm run "reached" a state in 1,509 calls that cold runs did not reach in
+500,000. A reachability figure means nothing unless it says which. The state the review of
+this change asked about — a DUSD-dominated position going unhealthy — was **not** reached
+cold in about 500,000 calls by this harness, by the same harness with the ceiling target
+disabled, or by the harness at `a3ef3c8`, before the ceiling existed: it is rare in every
+configuration, not something the ceiling took away. It is a candidate for a dedicated
+target.
 
 ### The stale-feed hole: most of the harness was dead
 

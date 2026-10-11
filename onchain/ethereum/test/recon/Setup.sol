@@ -42,6 +42,10 @@ abstract contract Setup is BaseSetup {
 
     uint256 internal constant ACTOR_FUNDING = 1_000_000e18;
 
+    /// @dev a DUSD debt ceiling no harness sequence can reach. Small enough that the borrow
+    /// target's `ceilingRoom + ceilingRoom / 4` cannot overflow.
+    uint256 internal constant OPEN_DUSD_CEILING = type(uint128).max;
+
     function setup() internal virtual override {
         wethFeed = new MockV3Aggregator(18, WETH_INITIAL_PRICE);
         usdcFeed = new MockV3Aggregator(8, USDC_INITIAL_PRICE);
@@ -85,9 +89,13 @@ abstract contract Setup is BaseSetup {
         // without this every DUSD borrow reverts and the DUSD targets do nothing
         dusd.setMinter(address(desultory), true);
 
-        // the debt ceiling is fail-closed (zero) until set — same value Deploy.s.sol uses.
-        // desultory_setDusdDebtCeiling moves it around current debt from here.
-        desultory.setDusdDebtCeiling(10_000_000e18);
+        // The debt ceiling is fail-closed (zero) until set. This is the one parameter that
+        // deliberately differs from Deploy.s.sol: actors hold a million of each token, billions
+        // of USD of borrow capacity, so the deploy's 10M ceiling would bind long before any
+        // DUSD-heavy position neared its health edge and those states would go unexercised.
+        // The ceiling's own behaviour is fuzzed by desultory_setDusdDebtCeiling instead, which
+        // moves it around current debt and sometimes reopens it.
+        desultory.setDusdDebtCeiling(OPEN_DUSD_CEILING);
 
         // Order matters: setProtocol must run while the deployer still owns the
         // NFT contract. Reversed, the health gate is permanently disabled.

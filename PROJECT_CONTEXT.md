@@ -306,8 +306,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   the accrual the call itself performs. Measurements and the before/after counters are in
   `docs/Audit/Invariants.md`; read that before trusting any campaign count.
   The DUSD debt ceiling is asserted in-target in `desultory_borrowDUSD` (a successful
-  borrow never leaves debt above it), and `desultory_setDusdDebtCeiling` moves it around
-  current debt.
+  borrow never leaves debt above it). The harness ceiling starts open — actors are far too
+  large for the deploy's 10M — and `desultory_setDusdDebtCeiling` moves it around current
+  debt or reopens it.
   `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
   **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding
