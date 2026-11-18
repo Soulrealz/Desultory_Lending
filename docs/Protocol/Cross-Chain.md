@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: edaa61a
+verified-against: 85b4210
 ---
 
 # Cross-Chain
@@ -117,9 +117,12 @@ ever appearing encumbered.
 DUSD debt is added to `userBorrowedAmountUSD` **at par**. Redemption now backs that
 convention from below: `redeem` / `redeemWithBackstop` convert a unit of DUSD into $1 of
 collateral less `REDEMPTION_FEE_BPS`, so below $0.995 arbitrage burns supply until the
-discount closes. See [[DUSD]]. The gap that remains is one-sided — nothing caps DUSD
-**above** $1, the direction that understates debt here and leaves positions
-under-collateralized in real terms, and supply caps (project C2.2) are not built.
+discount closes. See [[DUSD]]. The gap that remains is one-sided — nothing pulls DUSD back
+down from **above** $1, the direction that understates debt here and leaves positions
+under-collateralized in real terms. The lever for that direction is the stability fee:
+cheaper borrowing raises supply. The DUSD debt ceiling ([[0010-dusd-debt-ceiling]]) is
+**not** that lever — it restricts minting, so a binding ceiling pushes the price further up,
+not down. It is a risk limit and is documented as one.
 
 ## Configuration surface
 
@@ -130,6 +133,7 @@ Owner-only, on `Desultory`:
 | `setAdapter(address)` | the Adapter permitted to be paid for mint authorizations |
 | `setAllowedDestination(uint32 eid, bool)` | destination chains a position may mint to |
 | `setDusdStabilityFee(uint16 bps)` | accrues at the old rate first, then repoints |
+| `setDusdDebtCeiling(uint256)` | bound on this home chain's total DUSD debt, fee included; fail-closed at zero, enforced send-side in `_borrowDusd` — see [[0010-dusd-debt-ceiling]] |
 
 Owner-only, elsewhere: `Adapter.setDesultory`, `Adapter.setPeer` (from `OAppCore`),
 `DUSD.setMinter`.

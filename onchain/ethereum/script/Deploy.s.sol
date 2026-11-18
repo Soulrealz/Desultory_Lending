@@ -67,6 +67,9 @@ contract Deploy is Script
         dusd = new DUSD("DesultoryUSD", "DUSD", config.lz(), deployer);
         desultory = new Desultory(configs, address(position), address(dusd));
 
+        // the ceiling is fail-closed (zero) until set; without this no DUSD can be borrowed
+        desultory.setDusdDebtCeiling(config.dusdDebtCeiling());
+
         dusd.setMinter(address(desultory), true);
 
         // Peers and allowed destinations are per-deployment configuration and are

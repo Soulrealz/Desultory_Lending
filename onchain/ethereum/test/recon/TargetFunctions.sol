@@ -25,6 +25,9 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
     /// @dev matches Desultory's own SECONDS_PER_YEAR; used to re-derive an accrual bound
     uint256 internal constant SECONDS_PER_YEAR = 365 days;
 
+    /// @dev keeps desultory_setDusdDebtCeiling's range non-degenerate when no DUSD is owed
+    uint256 internal constant CEILING_FLOOR = 1_000e18;
+
     function _tokenSlot(uint8 seed) private pure returns (uint256) {
         return seed % 2;
     }
@@ -159,11 +162,29 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
         precondition(maxUSD > owedUSD);
 
         // DUSD is valued at $1, so USD headroom is the DUSD amount directly
-        amount = between(amount, 1, maxUSD - owedUSD);
+        uint256 healthRoom = maxUSD - owedUSD;
+
+        // The debt ceiling is the other bound. Most draws fit under it, so DUSD keeps flowing
+        // into the harness for repayment and redemption to work against; the top fifth of the
+        // range overshoots it on purpose, so the rejection is reached as well as the boundary.
+        // ceilingRoom comes from a view on the stored index and so slightly overstates the
+        // real room — a few "fitting" draws are rejected too, which costs nothing.
+        uint256 debt = desultory.getTotalDusdDebt();
+        uint256 ceiling = desultory.dusdDebtCeiling();
+        uint256 ceilingRoom = ceiling > debt ? ceiling - debt : 0;
+        uint256 reach = ceilingRoom + ceilingRoom / 4 + 1;
+
+        amount = between(amount, 1, healthRoom < reach ? healthRoom : reach);
 
         vm.prank(position.ownerOf(positionId));
         desultory.borrowDUSD(positionId, amount);
         ghostDusdMinted += amount;
+
+        // ADR 0010's guarantee is about what a BORROW may do, so it is asserted here rather
+        // than as a global property: accrual and a lowered ceiling both legitimately leave
+        // debt above the ceiling, but a borrow that succeeded never may. borrowDUSD accrued,
+        // so the view is current at this point.
+        lte(desultory.getTotalDusdDebt(), desultory.dusdDebtCeiling(), "a successful DUSD borrow left debt above the ceiling");
     }
 
     function desultory_repayDUSD(uint8, uint8 positionSeed, uint256 amount) public updateGhosts {
@@ -572,6 +593,30 @@ abstract contract TargetFunctions is BaseTargetFunctions, Properties {
 
         wethFeed.updateAnswer(wethFeed.latestAnswer());
         usdcFeed.updateAnswer(usdcFeed.latestAnswer());
+    }
+
+    /**
+     * @dev the owner moving the DUSD debt ceiling. Owner-only and it moves no tokens, so the
+     * ghosts are not touched.
+     *
+     * Half the draws land in [debt / 2, 2 * debt + CEILING_FLOOR] — around current debt,
+     * sometimes binding and sometimes not. The bottom of that range sits below current debt, a
+     * legitimate state the unwind paths must keep working through. At zero debt that range
+     * starts at zero, so the ceiling can briefly close entirely.
+     *
+     * The other half reopen it to OPEN_DUSD_CEILING. Without that, one call at low debt would
+     * pin the ceiling near 1,000 DUSD and every later draw would stay near it, shutting
+     * DUSD-heavy positions — and the liquidation and redemption states they drive — out of
+     * the rest of the sequence: the same silent failure as the stale-feed warp fixed in 810fbeb.
+     */
+    function desultory_setDusdDebtCeiling(uint8 mode, uint256 seed) public updateGhosts {
+        uint256 debt = desultory.getTotalDusdDebt();
+        // the reopen choice gets its own argument: keyed off `seed`, every multiple of 1e18
+        // in the fuzzers' value dictionaries would pick it and the ceiling would rarely bind
+        uint256 ceiling = mode % 2 == 0 ? OPEN_DUSD_CEILING : between(seed, debt / 2, 2 * debt + CEILING_FLOOR);
+
+        vm.prank(desultory.owner());
+        desultory.setDusdDebtCeiling(ceiling);
     }
 
     /// @dev the owner draining protocol revenue. Value-moving and owner-only, so it is

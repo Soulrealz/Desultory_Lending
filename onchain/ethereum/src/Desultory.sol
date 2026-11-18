@@ -53,6 +53,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     error Desultory__TokenAlreadyListed(address token);
     error Desultory__TokenLimitReached();
     error Desultory__TokenRetired(address token);
+    error Desultory__DusdDebtCeilingExceeded(uint256 totalDebt, uint256 ceiling);
 
     ////////////////////////
     // Events
@@ -68,6 +69,7 @@ contract Desultory is Ownable, ReentrancyGuard {
     event TokenAdded(address indexed token, address priceFeed);
     event TokenRetired(address indexed token, bool retired);
     event DusdStabilityFeeSet(uint16 bps);
+    event DusdDebtCeilingSet(uint256 ceiling);
     event ReservesWithdrawn(address indexed token, address indexed to, uint256 amount);
     event BackstopCommitted(address indexed token, uint256 amount);
     event BackstopReleased(address indexed token, uint256 amount);
@@ -214,6 +216,12 @@ contract Desultory is Ownable, ReentrancyGuard {
     address public adapter;
     mapping(uint32 eid => bool allowed) public allowedDestination;
     uint16 public dusdStabilityFeeBps;
+
+    /// @dev upper bound on total DUSD debt issued by THIS home chain, accrued fee
+    /// included (ADR 0010). A risk limit, not a peg tool: a binding ceiling pushes DUSD
+    /// above par, not toward it. Defaults to zero — fail-closed: DUSD borrowing is shut
+    /// until the owner opens it, so a forgotten configuration can never mean "unlimited".
+    uint256 public dusdDebtCeiling;
 
     // Interest Variables
     Interest private __interest;
@@ -513,6 +521,21 @@ contract Desultory is Ownable, ReentrancyGuard {
         accrueDusd();
         dusdStabilityFeeBps = bps;
         emit DusdStabilityFeeSet(bps);
+    }
+
+    /**
+     * @dev set the DUSD debt ceiling for this home chain.
+     *
+     * No range check, on purpose: 0 is a legitimate "close DUSD borrowing", and any value
+     * below current debt is a legitimate "freeze new issuance". Neither blocks repayment,
+     * redemption or liquidation, which never pass through _borrowDusd.
+     *
+     * Unlike setDusdStabilityFee this does not accrue first: changing the ceiling reprices
+     * nothing, and the borrow-time check accrues anyway.
+     */
+    function setDusdDebtCeiling(uint256 ceiling) external onlyOwner {
+        dusdDebtCeiling = ceiling;
+        emit DusdDebtCeilingSet(ceiling);
     }
 
     ////////////////////////
@@ -978,6 +1001,19 @@ contract Desultory is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev total DUSD debt issued by this home chain, accrued fee included, rounded UP —
+     * the figure the debt ceiling is checked against.
+     *
+     * Like every view here it reads the STORED index and does not simulate accrual since
+     * the last touch, so between accruals it understates debt. Headroom computed as
+     * dusdDebtCeiling - getTotalDusdDebt() is therefore an over-estimate unless
+     * accrueDusd() ran in the same block; leave margin or accrue first.
+     */
+    function getTotalDusdDebt() public view returns (uint256) {
+        return __fromScaledUp(totalScaledDusdDebt, dusdBorrowIndex);
+    }
+
+    /**
      * @dev accrue the DUSD stability fee. Charges borrowers FIRST and sends exactly
      * what was charged to reserves — deriving a notional interest figure separately
      * from the index update is what let the token-pool accrual distribute more than
@@ -1050,6 +1086,18 @@ contract Desultory is Ownable, ReentrancyGuard {
         uint256 scaled = __toScaledUp(amount, dusdBorrowIndex);
         __scaledDusdDebt[positionId] += scaled;
         totalScaledDusdDebt += scaled;
+
+        // The debt ceiling (ADR 0010), checked on the post-borrow total. This is the only
+        // site that adds DUSD debt, so it governs every route that adds it and none that
+        // removes it. Send-side by construction: ADR 0003 forbids any check on the receive
+        // path. Reads debt rounding UP, so it may bind a wei or two early, never late —
+        // and relies on the accrueDusd() above, without which the fee would be missing and
+        // the total understated. Runs before the health check because it is one storage
+        // read against a loop over every listed token.
+        uint256 totalDebt = __fromScaledUp(totalScaledDusdDebt, dusdBorrowIndex);
+        if (totalDebt > dusdDebtCeiling) {
+            revert Desultory__DusdDebtCeilingExceeded(totalDebt, dusdDebtCeiling);
+        }
 
         if (userBorrowedAmountUSD(positionId) > userMaxBorrowValueUSD(positionId)) {
             revert Desultory__CollateralValueNotEnough();

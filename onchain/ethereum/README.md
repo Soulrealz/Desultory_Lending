@@ -42,13 +42,18 @@ Stateful invariant fuzzing lives in `test/recon/`, built on the Chimera scaffold
 One harness drives both engines:
 
 ```
-medusa fuzz
-echidna . --contract CryticTester --config echidna.yaml
+medusa fuzz --test-limit 50000
+echidna . --contract CryticTester --config echidna.yaml --test-limit 30000
 ```
 
+Those limits are the project's verification gates; see `CONTRIBUTING.md`.
 Counterexamples from either engine replay as ordinary Foundry tests in
 `test/recon/CryticToFoundry.sol`.
 
 The harness asserts internal-consistency invariants only — see
-`docs/Audit/Invariants.md`. Liquidation entry points are deliberately absent from the
-target surface while that engine is broken.
+`docs/Audit/Invariants.md`. The target surface covers the whole user-facing protocol,
+liquidation, redemption and the backstop included, plus time warps and oracle price moves.
+
+`forge build --sizes` exits non-zero with an EIP-3860 initcode error for `CryticTester`.
+That is expected: the harness is only ever deployed inside the fuzzers' own EVMs, which do
+not enforce the limit.

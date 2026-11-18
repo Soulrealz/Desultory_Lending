@@ -1,23 +1,27 @@
 # Project Structure
 
-> Maintained per the rule in `CLAUDE.md`: update when files/directories are added, removed, renamed, or moved.
+> Maintained per the doc-upkeep rule in `CONTRIBUTING.md`: update when files/directories are added, removed, renamed, or moved.
 > Gitignored content (`lib/`, `out/`, `cache/`, `.env`, `broadcast/`, `docs/superpowers/`) is excluded.
 
 ```
 Desultory_Lending/
 ├── .gitattributes              # Enforces LF line endings
+├── .claude/
+│   └── settings.json           # Shared Claude Code permissions: safe build/test/read allows, asks for git writes and broadcasts, denies push/merge/.env
 ├── .gitignore
-├── CLAUDE.md                   # AI agent project instructions (doc upkeep rule, build/test notes)
+├── CLAUDE.md                   # AI agent instructions: points at CONTRIBUTING.md, plus agent-only working rules
+├── CONTRIBUTING.md             # Toolchain, verification gates, engineering rules, workflow, doc upkeep
 ├── LICENSE                     # Apache 2.0
 ├── PROJECT_CONTEXT.md          # High-level map of core logic per module
 ├── PROJECT_STRUCTURE.md        # This file
-├── README.md                   # Protocol specification: rates model, liquidation engine, governance
-├── next_steps.md               # Cold-start handoff: project state, what to build next and why
+├── README.md                   # Project overview, build status, quick start, and the original spec annotated with what was built
 ├── docs/                       # Obsidian vault (open this folder as the vault root)
 │   ├── README.md               # Vault orientation: the four zones and their accuracy contracts
 │   ├── .obsidian/              # Vault config (app/core-plugins/graph); workspace state gitignored
 │   ├── Protocol/               # MAINTAINED: what the protocol actually does, per module
 │   │   ├── Protocol.md         # Zone index
+│   │   ├── Architecture.md     # One-page map: contracts, call graph, main flows
+│   │   ├── Glossary.md         # Terms used across the vault
 │   │   ├── Accounting.md       # Dual-index model, scaled balances, reserves, rounding policy
 │   │   ├── Interest-Rate-Model.md  # 4-bracket kinked borrow curve, per-token multiplier
 │   │   ├── Positions.md        # NFT-as-position semantics, authorization, transfer health gate
@@ -35,15 +39,18 @@ Desultory_Lending/
 │   │   ├── 0006-internal-liquidation-backstop.md  # ADR: reserves committed as a protocol-owned deposit to fund a seizure
 │   │   ├── 0007-dusd-redemption.md  # ADR: DUSD redeemable for collateral at par less a flat fee, healthy positions only
 │   │   ├── 0008-reserve-cut-rounds-up.md  # ADR: the reserve cut ceilings, so dust pools cannot invert the indexes
-│   │   └── 0009-token-listing-admin.md  # ADR: tokens are appended and retired, never removed from the list
+│   │   ├── 0009-token-listing-admin.md  # ADR: tokens are appended and retired, never removed from the list
+│   │   └── 0010-dusd-debt-ceiling.md  # ADR: fail-closed DUSD debt ceiling per home chain; a risk limit, not a peg tool
 │   ├── Audit/                  # MAINTAINED: threat model, invariants, findings
 │   │   ├── Audit.md            # Zone index
+│   │   ├── Threat-Model.md     # Trust assumptions, owner powers, attack surface
+│   │   ├── Known-Issues.md     # Open, accepted and coverage-gap weaknesses
 │   │   ├── Invariants.md       # The twelve fuzzing invariants in prose, and what they found
 │   │   └── 2026-06-10-project-assessment.md  # State-of-the-project audit
 │   └── Notes/                  # NOT maintained: research and scratch thinking
 │       ├── Notes.md            # Zone index
-│       ├── Research/           # Reading notes on external systems (LayerZero, ElizaOS, Aave)
-│       └── Log/                # Dated working notes
+│       ├── Research/           # Reading notes on external systems (empty so far)
+│       └── Log/                # Dated working notes (empty so far)
 └── onchain/
     └── ethereum/               # Foundry project (solc 0.8.28)
         ├── README.md           # Dependency install (--no-git), test + fuzzing instructions
@@ -69,6 +76,7 @@ Desultory_Lending/
         └── test/
             ├── Desultory.t.sol      # Core suite: deposit/withdraw/borrow/repay, yield, NFT transfers, health factor, ownership, DUSD debt, liquidation, redemption
             ├── TokenAdmin.t.sol     # addToken / setTokenRetired: validation, the 32-token cap, and that a retired asset's positions still unwind
+            ├── DusdDebtCeiling.t.sol # DUSD debt ceiling: fail-closed default, boundary, both entry points, unwind paths unaffected
             ├── LiquidationMath.t.sol # Unit + fuzz tests for the liquidation math library
             ├── RedemptionMath.t.sol  # Unit + fuzz tests for the redemption fee pair
             ├── DUSD.t.sol      # DUSD unit tests (minter gating, OFT wiring)

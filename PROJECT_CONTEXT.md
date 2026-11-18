@@ -1,6 +1,6 @@
 # Project Context
 
-> Maintained per the rule in `CLAUDE.md`: update when core logic is added or rewritten.
+> Maintained per the doc-upkeep rule in `CONTRIBUTING.md`: update when core logic is added or rewritten.
 > This is a rough map of what lives where — enough to orient, not full documentation.
 
 ## What this project is
@@ -8,8 +8,10 @@
 A learning project: an over-collateralized, cross-chain borrow/lending protocol.
 Target design: deposit collateral on one chain (e.g. Ethereum mainnet), borrow against
 it on another (e.g. Base/Optimism) via LayerZero. Positions are represented as NFTs so
-they can eventually be traded between users. Full spec in `README.md`; current
-gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
+they can be traded between users. `README.md` has the status table and the original spec
+(annotated with what was built, changed or not built) and the roadmap; `CONTRIBUTING.md` has
+the rules; `docs/Audit/Known-Issues.md` has the known open issues. `docs/Audit/2026-06-10-project-assessment.md` is a historical snapshot
+from before most of this work and no longer describes the code.
 
 ## Modules
 
@@ -42,9 +44,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   (seize line, percent — must be strictly greater than `ltvRatio`) and
   `liquidationBonusBps` (liquidator discount, capped at `MAX_BONUS_BPS = 2_000`,
   i.e. 20%); the constructor reverts with `Desultory__InvalidRiskParams(token)` if
-  either is out of range. `liquidationThreshold` is now consumed by
-  `weightedCollateralUSD`/`healthFactor` (below); `liquidationBonusBps` is still
-  unread — the liquidation redesign proper is a later task. `getTokenInfo(token)`
+  either is out of range. `liquidationThreshold` is consumed by
+  `weightedCollateralUSD`/`healthFactor` (below) and `liquidationBonusBps` by
+  `_liquidate`'s seizure math. `getTokenInfo(token)`
   exposes the full `Collateral` struct for a token.
 - View caveat: `getPositionBorrowForToken`/`getPositionCollateralForToken`
   read stored indexes — they don't simulate accrual since `lastUpdate`.
@@ -130,7 +132,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   deliberately **unchanged** by the redemption work: redemption is what now *enforces* it,
   since below $0.995 buying DUSD and redeeming it is profitable and burns supply until the
   discount closes. Only its comment changed. It is a floor, not a band — nothing caps DUSD
-  above $1, and supply caps (C2.2) are not built. See `docs/Protocol/DUSD.md`.
+  above $1, and the debt ceiling does not: binding, it pushes DUSD up. See
+  `docs/Protocol/DUSD.md`.
 - Two distinct collateral-weighted views, deliberately separate: `userMaxBorrowValueUSD`
   (LTV-weighted — "may this borrow more?", checked directly by `borrow`/`withdraw`) and
   `weightedCollateralUSD` (liquidation-threshold-weighted — "may this be seized?", feeds
@@ -143,7 +146,13 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   between its LTV cap and its liquidation threshold is deliberately still transferable.
 - `Ownable` (added with the cross-chain work; previously there was no access control at
   all). Owner-only: `setAdapter`, `setAllowedDestination(eid, bool)`,
-  `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS).
+  `setDusdStabilityFee(bps)` (accrues at the old rate first, capped at MAX_BPS),
+  `setDusdDebtCeiling(ceiling)` — the DUSD debt ceiling (ADR 0010): a bound on this home
+  chain's total DUSD debt including accrued fee, checked in `_borrowDusd` on the post-borrow
+  total before the health check, fail-closed at a zero storage default (`Deploy.s.sol` sets
+  it from `Config.s.sol`). It sits on the only site that adds DUSD debt, so it never blocks
+  repay, redeem or liquidate. A risk limit, not a peg tool. `getTotalDusdDebt()` exposes
+  the figure it checks.
 - `withdrawReserves(token, to, amount)` (owner-only) pays out a pool's accumulated revenue —
   the RESERVE_FACTOR interest cut plus LIQ_PROTOCOL_SHARE of liquidation bonuses. It accrues
   first and needs no liquidity gate: the balance and `pool.reserves` fall by the same amount,
@@ -239,7 +248,7 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   function is now wired into `Desultory.liquidate` (see `src/Desultory.sol` above).
 
 ### `test/`
-- `Desultory.t.sol` — 84 tests: deposit/withdraw/borrow/repay on the positionId
+- `Desultory.t.sol` — 87 tests: deposit/withdraw/borrow/repay on the positionId
   API, interest accrual & lender yield (incl. 10% reserve check), NFT-transfer
   control handoff, unhealthy-transfer gating, health-factor semantics (threshold-
   vs LTV-weighted, the buffer band between them), scaled-getter reconstruction,
@@ -249,12 +258,17 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   engine — bonus payout, close-factor clamping, event emission, allowance/authorization
   reverts, accrue-before-evaluate ordering, seizure clamped to held collateral with the
   repayment back-solved down to match, and `totalBadDebtUSD` recognition (and
-  non-recognition when collateral remains).
+  non-recognition when collateral remains), plus the internal backstop, reserve
+  withdrawal and DUSD redemption.
 - `TokenAdmin.t.sol` — 16 tests for `addToken`/`setTokenRetired`: the validation surface,
   the 32-token cap on both the constructor and `addToken`, that a freshly listed pool
   charges no interest for time before it was listed, and the load-bearing one — a retired
   asset's position reports a bit-identical health factor and still repays, withdraws and
   liquidates.
+- `DusdDebtCeiling.t.sol` — 16 tests for the DUSD debt ceiling: fail-closed default, the
+  boundary at WAD and after accrual, a fuzz test that it never binds late, both borrow
+  entry points, debt above the ceiling, and that repay/redeem/liquidate all still work at a
+  zero ceiling.
 - `LiquidationMath.t.sol` — 10 unit and fuzz tests for the library above.
 - `RedemptionMath.t.sol` — 5 unit and fuzz tests for the fee pair, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
@@ -295,6 +309,10 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   a pool short on purpose, and `desultory_releaseBackstop`'s bound was re-derived to survive
   the accrual the call itself performs. Measurements and the before/after counters are in
   `docs/Audit/Invariants.md`; read that before trusting any campaign count.
+  The DUSD debt ceiling is asserted in-target in `desultory_borrowDUSD` (a successful
+  borrow never leaves debt above it). The harness ceiling starts open — actors are far too
+  large for the deploy's 10M — and `desultory_setDusdDebtCeiling` moves it around current
+  debt or reopens it.
   `property_borrowIndexOutpacesLiquidityIndex` failed under Medusa on `master` and is
   **fixed** by ADR 0008 (both accrual roundings now turn toward the pool). `AccrualLeak.t.sol` is the
   regression test for the accrual bug this harness found. A Medusa run after adding
@@ -305,5 +323,4 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   also heavily borrowed elsewhere and push that pool's debt above its deposits. Fixed by
   folding the same `getAvailableLiquidity` bound into `liquidate()`'s existing seizure
   clamp (`src/Desultory.sol`); regression test
-  `testSeizureIsBoundedByAvailableLiquidity` in `test/Desultory.t.sol`. See
-  `.superpowers/sdd/2026-09-12-liquidation-engine/task-7-report.md`.
+  `testSeizureIsBoundedByAvailableLiquidity` in `test/Desultory.t.sol`.

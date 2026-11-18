@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: edaa61a
+verified-against: 85b4210
 ---
 
 # DUSD
@@ -90,7 +90,8 @@ than the contract assuming it. The valuation code is unchanged and deliberately 
 
 **What this does and does not buy.** It is a floor, not a band. Nothing caps DUSD above
 $1, which is the direction that *understates* debt and lets an under-collateralized
-position read as healthy. Supply caps (C2.2) are the other half and are not built.
+position read as healthy. The debt ceiling is not the other half: it restricts supply,
+which pushes the price up, not down — see [[#The debt ceiling]].
 
 ## Redemption
 
@@ -209,14 +210,34 @@ is open.
 Token reserves in `pool.reserves` are a different thing entirely and do leave, through
 `withdrawReserves`. See [[Accounting]].
 
+## The debt ceiling
+
+Total DUSD debt issued by this home chain is bounded by `dusdDebtCeiling`, set by the owner
+with `setDusdDebtCeiling` ([[0010-dusd-debt-ceiling]]). It counts debt **including accrued
+stability fee** — `getTotalDusdDebt()`, rounded up — and is checked in `_borrowDusd` on the
+post-borrow total, so it covers `borrowDUSD` and `borrowDUSDTo` alike and fires before any
+LayerZero message is attempted.
+
+It is **fail-closed**: the storage default is zero, and `Deploy.s.sol` sets the initial value
+from `Config.s.sol`. It sits on the only site that adds DUSD debt, so no value of it can
+block `repayDUSD`, redemption, or liquidation. Debt above it — from accrual, or from the
+owner lowering it — just blocks new borrows until repayments bring the total back under.
+
+It is a **risk limit, not a peg tool**: a binding ceiling restricts supply, which pushes
+DUSD above par rather than toward it. It is also per home chain, because no chain can see
+global DUSD supply locally; a global figure is the owner keeping per-chain ceilings
+consistent.
+
 ## What is still open
 
-- **Supply caps (C2.2).** Nothing bounds how much DUSD can be minted, per position, per
-  chain or globally. Redemption floors the price; nothing ceilings the supply.
+- **Per-position and global caps.** The debt ceiling bounds each home chain's total; nothing
+  bounds a single position's share, and a global figure is operational discipline across
+  chains rather than an on-chain guarantee. See [[0010-dusd-debt-ceiling]].
 - **The `dusdReserves` outlet (C2.3).** Above. Unblocked in principle, not decided.
-- **No ceiling mechanism.** Redemption is one-sided. DUSD above $1 is still the direction
-  that understates debt, and the only force against it is a borrower's incentive to mint
-  and sell.
+- **No above-par mechanism.** Redemption is one-sided. DUSD above $1 is still the direction
+  that understates debt; the forces against it are a borrower's incentive to mint and sell,
+  and the stability fee as an owner lever. The debt ceiling does not help here — binding,
+  it pushes the other way.
 - **Cross-chain liquidation and redemption.** Both engines are single-chain: they act on a
   position at its home chain. DUSD acquired anywhere can be brought home to redeem, but the
   call itself happens where the position lives. See [[Cross-Chain]].
@@ -225,6 +246,11 @@ Token reserves in `pool.reserves` are a different thing entirely and do leave, t
 
 - `test/RedemptionMath.t.sol` — the fee pair in isolation, including
   `testFuzzRoundTripNeverFavorsTheRedeemer`.
+- `test/DusdDebtCeiling.t.sol` — the ceiling: fail-closed default, the exact boundary at
+  WAD and the two-wei-early bound after accrual, both borrow entry points, accrual past
+  the ceiling, and the load-bearing one — with the ceiling at zero, repay, redeem and
+  liquidate all still succeed. `test/crosschain/CrossChainBorrow.t.sol` pins that a mint
+  already in flight lands after the ceiling closes.
 - `test/Desultory.t.sol` — twelve redemption tests: the happy path, the fee staying with
   the position, the health-factor improvement, the unhealthy-position revert and its
   liquidatable counterpart, the no-DUSD-debt revert, the clamp to outstanding debt, and

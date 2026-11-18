@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2df55c5
+verified-against: 10d4d92
 ---
 
 # Invariants
@@ -140,7 +140,7 @@ the class of slip where a commit or a release moves one line and not the other �
 invariant 1 would also catch, but only while every position in the harness is enumerable;
 this one holds regardless.
 
-## The one assertion that is not a property
+## Assertions that are not properties
 
 Redemption is asserted **inside its target functions**, not as a `property_`:
 
@@ -167,6 +167,48 @@ redemption that took the right collateral and retired too little debt would sati
 That class is covered by `testRedeemImprovesTheTargetHealthFactor` in
 `test/Desultory.t.sol` as a unit test, where no time passes between the snapshot and the
 call, and by nothing in the fuzzer.
+
+### The debt ceiling
+
+`desultory_borrowDUSD` asserts, after every **successful** borrow:
+
+> `getTotalDusdDebt() <= dusdDebtCeiling()`
+
+It cannot be a `property_`: accrual alone, or the owner lowering the ceiling, legitimately
+leaves debt above it. ADR 0010's guarantee is about what a *borrow* may do, so it is
+asserted where a borrow happens.
+
+The borrow target bounds its amount by both health headroom and ceiling headroom, with the
+top fifth of the ceiling range deliberately overshooting so rejections are exercised.
+
+**The harness ceiling starts open**, at `type(uint128).max` — the one parameter where
+`Setup.sol` deliberately differs from `Deploy.s.sol`. Actors hold a million of each token,
+billions of USD of borrow capacity, so the deploy's 10M ceiling capped every DUSD borrow
+long before a large position neared its health edge. With the ceiling open the borrow bound
+reduces exactly to the pre-ceiling `between(amount, 1, healthRoom)`.
+`desultory_setDusdDebtCeiling` then moves it: half its calls draw from
+`[debt / 2, 2 * debt + 1,000 DUSD]`, around current debt (at zero debt that range starts at
+zero, so the ceiling can briefly close); the other half reopen it. The reopen choice is a
+separate `uint8` argument — keyed off the value seed, every multiple of `1e18` in the
+fuzzers' dictionaries picked it. Without a reopen, one call at low debt pinned the ceiling
+near 1,000 DUSD for the rest of the sequence, the same silent narrowing as the stale-feed
+warp below.
+
+Reachability, by temporary counters (removed before commit), Medusa at a 500,000 test limit
+**from an empty corpus**: a borrow rejected by the ceiling fired inside the first progress
+interval (about three seconds); a borrow succeeding with at most 1% of the ceiling as
+headroom fired within 18,175 calls. Both figures are upper bounds — the call counter is
+sampled every few seconds and freezes while workers shrink.
+
+**Read campaign figures with the corpus in mind.** `medusa.json` and `echidna.yaml` persist
+their corpora (`medusa-corpus/`, `echidna-corpus/`), and a warm corpus replays earlier
+sequences: one warm run "reached" a state in 1,509 calls that cold runs did not reach in
+500,000. A reachability figure means nothing unless it says which. The state the review of
+this change asked about — a DUSD-dominated position going unhealthy — was **not** reached
+cold in about 500,000 calls by this harness, by the same harness with the ceiling target
+disabled, or by the harness at `a3ef3c8`, before the ceiling existed: it is rare in every
+configuration, not something the ceiling took away. It is a candidate for a dedicated
+target.
 
 ### The stale-feed hole: most of the harness was dead
 
@@ -381,13 +423,14 @@ medusa fuzz --test-limit 50000
 echidna . --contract CryticTester --config echidna.yaml --test-limit 30000
 ```
 
-Echidna is **27/27** at `--test-limit 30000`, up from 25/25 — the two redemption target
-functions (`desultory_redeem`, `desultory_redeemWithBackstop`) are what the count rose by;
-no new `property_` was added, because the redemption assertion lives in-target (above).
-
-Medusa is **26 passed, 0 failed** at `--test-limit 50000`, up from 24 — the two redemption
-target functions are what the count rose by. It was 25 passed / 1 failed until
-[[0008-reserve-cut-rounds-up]] closed the dust-pool inversion described above.
+Last run at `10d4d92` (2026-11-18), with the persisted corpora: Medusa **29 passed, 0
+failed** at `--test-limit 50000`; Echidna **30 passing, 0 failed** at `--test-limit 30000`.
+These counts are the twelve properties plus every target function, since in assertion mode
+each target is its own test. The count rises when a target is added, not only when a
+property is. It was 25/25 and 24 before the redemption targets, and Medusa sat at
+25 passed / 1 failed until [[0008-reserve-cut-rounds-up]] closed the dust-pool inversion
+described above. A green count means "not found at this limit with this corpus", nothing
+stronger. See the warning about warm corpora under the debt ceiling section.
 
 Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 
