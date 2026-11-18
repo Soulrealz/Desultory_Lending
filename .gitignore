@@ -22,3 +22,9 @@ onchain/ethereum/echidna-corpus/
 onchain/ethereum/medusa-corpus/
 onchain/ethereum/crytic-export/
 onchain/ethereum/foundry.lock
+
+# Personal, per-machine Claude Code settings (shared rules live in .claude/settings.json)
+.claude/settings.local.json
+
+# Local session handoff; permanent content lives in CONTRIBUTING.md, README.md and docs/
+next_steps.md
