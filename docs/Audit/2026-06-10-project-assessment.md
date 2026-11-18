@@ -1,5 +1,10 @@
 # Desultory Lending — Project State Assessment (2026-06-10)
 
+> **Historical.** This is a snapshot from June 2026, before the liquidation rewrite, the
+> cross-chain work, lender yield, DUSD and the fuzzing harness. Almost every gap it lists
+> has since been closed. It is kept as the record of where the salvage started. For the
+> current state, read the repository `README.md`, [[Architecture]] and [[Known-Issues]].
+
 ## Verdict: Salvageable — keep the scaffold and core flows, rewrite liquidations, design the missing layers
 
 The project compiles cleanly on solc 0.8.28 / Foundry 1.5.1 and all 10 tests pass

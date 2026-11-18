@@ -1,6 +1,6 @@
 # Project Context
 
-> Maintained per the rule in `CLAUDE.md`: update when core logic is added or rewritten.
+> Maintained per the doc-upkeep rule in `CONTRIBUTING.md`: update when core logic is added or rewritten.
 > This is a rough map of what lives where — enough to orient, not full documentation.
 
 ## What this project is
@@ -8,8 +8,10 @@
 A learning project: an over-collateralized, cross-chain borrow/lending protocol.
 Target design: deposit collateral on one chain (e.g. Ethereum mainnet), borrow against
 it on another (e.g. Base/Optimism) via LayerZero. Positions are represented as NFTs so
-they can eventually be traded between users. Full spec in `README.md`; current
-gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
+they can be traded between users. `README.md` has the status table and the original spec
+(annotated with what was built, changed or not built) and the roadmap; `CONTRIBUTING.md` has
+the rules; `docs/Audit/Known-Issues.md` has the known open issues. `docs/Audit/2026-06-10-project-assessment.md` is a historical snapshot
+from before most of this work and no longer describes the code.
 
 ## Modules
 
@@ -42,9 +44,9 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   (seize line, percent — must be strictly greater than `ltvRatio`) and
   `liquidationBonusBps` (liquidator discount, capped at `MAX_BONUS_BPS = 2_000`,
   i.e. 20%); the constructor reverts with `Desultory__InvalidRiskParams(token)` if
-  either is out of range. `liquidationThreshold` is now consumed by
-  `weightedCollateralUSD`/`healthFactor` (below); `liquidationBonusBps` is still
-  unread — the liquidation redesign proper is a later task. `getTokenInfo(token)`
+  either is out of range. `liquidationThreshold` is consumed by
+  `weightedCollateralUSD`/`healthFactor` (below) and `liquidationBonusBps` by
+  `_liquidate`'s seizure math. `getTokenInfo(token)`
   exposes the full `Collateral` struct for a token.
 - View caveat: `getPositionBorrowForToken`/`getPositionCollateralForToken`
   read stored indexes — they don't simulate accrual since `lastUpdate`.
@@ -246,7 +248,7 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   function is now wired into `Desultory.liquidate` (see `src/Desultory.sol` above).
 
 ### `test/`
-- `Desultory.t.sol` — 84 tests: deposit/withdraw/borrow/repay on the positionId
+- `Desultory.t.sol` — 87 tests: deposit/withdraw/borrow/repay on the positionId
   API, interest accrual & lender yield (incl. 10% reserve check), NFT-transfer
   control handoff, unhealthy-transfer gating, health-factor semantics (threshold-
   vs LTV-weighted, the buffer band between them), scaled-getter reconstruction,
@@ -256,7 +258,8 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   engine — bonus payout, close-factor clamping, event emission, allowance/authorization
   reverts, accrue-before-evaluate ordering, seizure clamped to held collateral with the
   repayment back-solved down to match, and `totalBadDebtUSD` recognition (and
-  non-recognition when collateral remains).
+  non-recognition when collateral remains), plus the internal backstop, reserve
+  withdrawal and DUSD redemption.
 - `TokenAdmin.t.sol` — 16 tests for `addToken`/`setTokenRetired`: the validation surface,
   the 32-token cap on both the constructor and `addToken`, that a freshly listed pool
   charges no interest for time before it was listed, and the load-bearing one — a retired
@@ -320,5 +323,4 @@ gaps/bugs catalogued in `docs/Audit/2026-06-10-project-assessment.md`.
   also heavily borrowed elsewhere and push that pool's debt above its deposits. Fixed by
   folding the same `getAvailableLiquidity` bound into `liquidate()`'s existing seizure
   clamp (`src/Desultory.sol`); regression test
-  `testSeizureIsBoundedByAvailableLiquidity` in `test/Desultory.t.sol`. See
-  `.superpowers/sdd/2026-09-12-liquidation-engine/task-7-report.md`.
+  `testSeizureIsBoundedByAvailableLiquidity` in `test/Desultory.t.sol`.

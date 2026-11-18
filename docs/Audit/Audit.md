@@ -9,5 +9,7 @@ invariant nobody can review.
 
 ## Notes
 
+- [[Threat-Model]] — trust assumptions, what the owner can do, and the attack surface
+- [[Known-Issues]] — weaknesses that are known and not fixed, and why
 - [[Invariants]] — the twelve properties the fuzzing harness asserts, and why
-- [[2026-06-10-project-assessment]] — state-of-the-project audit: what works, what is broken
+- [[2026-06-10-project-assessment]] — historical: the June 2026 state-of-the-project audit that the rewrite started from

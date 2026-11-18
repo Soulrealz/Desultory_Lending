@@ -13,6 +13,8 @@ verified-against: <commit sha>
 
 ## Notes
 
+- [[Architecture]] — the contracts, who calls whom, and the main flows. Read this first.
+- [[Glossary]] — terms used across the vault
 - [[Accounting]] — dual-index model, scaled balances, reserve factor, rounding policy
 - [[Interest-Rate-Model]] — the 4-bracket kinked borrow curve
 - [[Positions]] — the NFT *is* the position; ownership and transfer gating

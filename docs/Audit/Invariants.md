@@ -1,6 +1,6 @@
 ---
 status: current
-verified-against: 2df55c5
+verified-against: 10d4d92
 ---
 
 # Invariants
@@ -423,13 +423,14 @@ medusa fuzz --test-limit 50000
 echidna . --contract CryticTester --config echidna.yaml --test-limit 30000
 ```
 
-Echidna is **27/27** at `--test-limit 30000`, up from 25/25 — the two redemption target
-functions (`desultory_redeem`, `desultory_redeemWithBackstop`) are what the count rose by;
-no new `property_` was added, because the redemption assertion lives in-target (above).
-
-Medusa is **26 passed, 0 failed** at `--test-limit 50000`, up from 24 — the two redemption
-target functions are what the count rose by. It was 25 passed / 1 failed until
-[[0008-reserve-cut-rounds-up]] closed the dust-pool inversion described above.
+Last run at `10d4d92` (2026-11-18), with the persisted corpora: Medusa **29 passed, 0
+failed** at `--test-limit 50000`; Echidna **30 passing, 0 failed** at `--test-limit 30000`.
+These counts are the twelve properties plus every target function, since in assertion mode
+each target is its own test. The count rises when a target is added, not only when a
+property is. It was 25/25 and 24 before the redemption targets, and Medusa sat at
+25 passed / 1 failed until [[0008-reserve-cut-rounds-up]] closed the dust-pool inversion
+described above. A green count means "not found at this limit with this corpus", nothing
+stronger. See the warning about warm corpora under the debt ceiling section.
 
 Counterexamples replay as Foundry tests via `test/recon/CryticToFoundry.sol`.
 
